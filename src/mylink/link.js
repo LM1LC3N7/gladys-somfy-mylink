@@ -3,15 +3,20 @@
 // more), opened when there is something to send and closed when idle (the
 // bridge drops idle sockets), the requests written in order of priority:
 //
-//   1. protective commands (stop, close): written at once on the open
-//      connection, even when the answer to the previous request has not come;
-//      a connection whose requests got no byte for 1 s is cut first, and the
-//      new connection is opened only once the old one is closed. A connection
-//      that fails before the bytes are written is tried again every 250 ms
-//      within the deadline of the command;
+// ONE request in flight per connection: the next one is written only after
+// the answer to the previous one (a bridge that reads everything waiting on
+// its socket at once could drop requests glued together; pysomfymylink never
+// has two in flight either). In order of priority:
+//
+//   1. protective commands (stop, close), in their order of arrival: at once
+//      on an idle connection, else right after the answer to the request in
+//      flight; when that request got no answer for 1 s since it was written,
+//      a timer cuts the connection, waits until it is closed, and the
+//      command goes on a new one. A connection that fails before the bytes
+//      are written is tried again every 250 ms within the deadline;
 //   2. the other commands (open, favourite position, scenes), in their order
-//      of arrival: written after the answer to the previous request, or
-//      400 ms after it at most;
+//      of arrival, after the answer to the previous request (never cutting
+//      anything);
 //   3. reads (list of shades and scenes): only on an idle link, and cut at
 //      once by any command.
 //
@@ -48,7 +53,7 @@ export class Link {
     this.queue = [];
     this.order = 0;
     this.nextId = 1;
-    /** The open connection: { socket, scanner, pending, lastActivity, lastWriteAt, dead, closed } */
+    /** The open connection: { socket, scanner, pending (one entry at most), dead, closed, reason } */
     this.conn = undefined;
     /** Connections being closed: a new one waits for them. */
     this.closing = new Set();
@@ -91,11 +96,13 @@ export class Link {
   }
 
   /** Rejects the jobs not written yet that match (`cancelled`, never sent). */
-  cancel(match) {
+  cancel(match, why) {
     const kept = [];
     for (const job of this.queue) {
       if (match(job)) {
-        job.reject(new LinkError('cancelled'));
+        const error = new LinkError('cancelled');
+        error.why = why;
+        job.reject(error);
       } else {
         kept.push(job);
       }
@@ -157,6 +164,9 @@ export class Link {
   }
 
   wakeAt(at) {
+    if (!Number.isFinite(at)) {
+      return;
+    }
     if (this.wakeTimer) {
       this.timers.clearTimeout(this.wakeTimer);
     }
@@ -187,6 +197,11 @@ export class Link {
     return best;
   }
 
+  /** The nearest deadline of the jobs waiting (Infinity when none). */
+  nextDeadline() {
+    return Math.min(...this.queue.map((j) => j.deadline));
+  }
+
   remove(job) {
     this.queue = this.queue.filter((j) => j !== job);
   }
@@ -215,27 +230,29 @@ export class Link {
     }
     const conn = this.conn && !this.conn.dead ? this.conn : undefined;
     if (conn && conn.pending.size > 0) {
-      const reading = [...conn.pending.values()].some((entry) => entry.job.kind === 'read');
-      if (reading && job.kind !== 'read') {
+      const [entry] = conn.pending.values();
+      if (entry.job.kind === 'read' && job.kind !== 'read') {
         // A command never waits for a read.
         await this.cut(conn, 'preempted');
         this.again = true;
         return;
       }
-      if (job.kind !== 'read' && mono - conn.lastActivity >= this.timings.staleAfter) {
-        // No byte for a second: the connection may be dead; a new one for
-        // the command (above all for a stop), once this one is closed.
-        await this.cut(conn);
-        this.again = true;
+      if (job.kind === 'protective') {
+        const staleAt = entry.writtenAt + this.timings.staleAfter;
+        if (mono >= staleAt) {
+          // No answer for a second: the connection may be stuck; a new one
+          // for the stop or close, once this one is closed.
+          await this.cut(conn, 'stale');
+          this.again = true;
+          return;
+        }
+        this.wakeAt(Math.min(staleAt, this.nextDeadline()));
         return;
       }
-      if (job.kind === 'read') {
-        return; // Reads only on an idle link: started again by the last answer.
-      }
-      if (job.kind === 'command' && mono < conn.lastWriteAt + this.timings.pipelineAfter) {
-        this.wakeAt(conn.lastWriteAt + this.timings.pipelineAfter);
-        return;
-      }
+      // Wait for the answer (it starts this loop again); a queued job past
+      // its deadline is still rejected on time.
+      this.wakeAt(this.nextDeadline());
+      return;
     }
     if (!conn) {
       await this.connect(job, mono);
@@ -306,8 +323,6 @@ export class Link {
           socket,
           scanner: new ObjectScanner(),
           pending: new Map(),
-          lastActivity: this.monotonic(),
-          lastWriteAt: -Infinity,
           dead: false,
           closed,
           reason: 'closed',
@@ -334,9 +349,15 @@ export class Link {
     }
     const id = this.nextId;
     this.nextId = id >= 2 ** 31 ? 1 : id + 1;
-    const timeout = job.kind === 'read' ? this.timings.readTimeout : this.timings.replyTimeout;
+    const timeout =
+      job.kind === 'read'
+        ? this.timings.readTimeout
+        : job.kind === 'protective'
+          ? this.timings.protectiveReplyTimeout
+          : this.timings.replyTimeout;
     const entry = {
       job,
+      writtenAt: mono,
       timer: this.timers.setTimeout(() => {
         if (conn.pending.get(id) === entry) {
           conn.pending.delete(id);
@@ -346,12 +367,7 @@ export class Link {
         }
       }, timeout),
     };
-    if (conn.pending.size === 0) {
-      // Silence is counted from the first request waiting for an answer.
-      conn.lastActivity = mono;
-    }
     conn.pending.set(id, entry);
-    conn.lastWriteAt = mono;
     conn.socket.write(encodeRequest(id, job.method, job.params, this.systemId));
   }
 
@@ -359,7 +375,6 @@ export class Link {
     if (conn.dead) {
       return;
     }
-    conn.lastActivity = this.monotonic();
     let texts;
     try {
       texts = conn.scanner.push(chunk);
@@ -387,6 +402,9 @@ export class Link {
             code: code ?? undefined,
           }),
         );
+      } else if (message.result === false) {
+        // Meaning unknown (see TODO.md): never taken as "accepted".
+        entry.job.reject(new LinkError('unexpected', { written: true }));
       } else {
         entry.job.resolve(message.result);
       }

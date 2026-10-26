@@ -58,14 +58,22 @@ test/                             node --test, against the SDK's fake Gladys and
   claim a command "confirmed". The badge says "assumed".
 - A shade is a `shutter`, the favourite position and the scenes are
   `button/push`: never `switch`/`binary`.
+- ONE request in flight per connection (each after the answer of the bridge),
+  until a real bridge shows otherwise.
 - STOP and CLOSE depend on no option, no read, no refused-System-ID marker:
-  they go ahead on the link, cut a read, cut a connection silent for 1 s
-  (the new one opens only after the old one closed), are tried again every
-  250 ms within 3.5 s, then held (retries at 2, 5, 10 s; a STOP never later
-  than 15 s after the click: at rest it is the "my" button).
+  they go ahead of the other commands, cut a read, and cut (by a timer) a
+  connection whose request got no answer for 1 s (the new one opens only
+  after the old one closed); a failed connection is tried again every 250 ms
+  within 3.5 s. A CLOSE without an answer is written again within 3.5 s, then
+  held (tries 5, 12, 25 s after the click). A STOP is never written twice
+  (at rest it is the "my" button) and never later than 8 s after the click.
+- Holds live in memory only: never replayed after a restart (badge "not
+  sent"). Any command arriving for a shade drops its hold; a MyLink scene
+  drops them all.
 - Every command is numbered at its arrival: an older one never leaves after a
-  newer stop or close of its shade; a newer one written drops a held one.
-- A command whose bytes may have left is never "not sent".
+  newer one of its shade.
+- Success = answered by the bridge. Written without an answer is an error
+  ("state unknown" / "check the shade"), never "not sent".
 - One clock read per decision (`dueAt(mono)`); pauses and deadlines on the
   monotonic clock, the wall clock only for /data.
 - The System ID only goes into the bytes of a request: never in a log, a

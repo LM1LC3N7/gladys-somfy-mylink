@@ -49,8 +49,9 @@ position, and the bridge only says it took the command. So:
 - the badge of each shade (orange dot) says "Assumed state" with the last
   command and whether the bridge accepted it;
 - no command can be "confirmed by a read": a successful command means
-  "accepted by the bridge", and without an answer of the bridge it is told
-  "sent, the bridge did not answer", never "not sent".
+  "accepted by the bridge" (it answered). Without an answer of the bridge,
+  Gladys shows an error "sent, but the bridge did not answer: state unknown"
+  (the command may have left: it is never told "not sent").
 
 **Stop and favourite position**: on an RTS motor this is the same "my"
 button. While moving, it stops the shade; at rest, it sends it to its
@@ -59,46 +60,70 @@ stop while the shade is still moves it to its favourite position.
 
 ## Stop and close
 
-Stop and close go **before** everything else: a read in progress is cut, a
-connection without an answer for a second is closed then opened again, and
-they wait neither for the list of shades, nor for a System ID validated by a
-read, nor for a recent read. One exchange at a time with the bridge (it
-accepts one connection only); several commands at once (a Gladys scene on five
-shades) leave one after the other on the same connection.
+Stop and close go **before** the other commands: a read in progress is cut,
+and they wait neither for the list of shades, nor for a System ID validated by
+a read, nor for a recent read. The bridge accepts one connection, and the
+integration sends it **one request at a time**, each after the answer of the
+bridge to the previous one. When the request in flight has had no answer for a
+second, the connection is cut, and the stop or close goes on a new connection
+once the old one is closed. A Gladys scene on five shades therefore takes five
+times the answer time of the bridge; what could not leave within 3.5 s is held
+(see below).
 
-They are refused in these cases, and only these:
+**The newest wins, from its arrival**: any new click on a shade (open, close,
+stop, favourite position), whether it leaves or not, cancels the held command
+of that shade; running a MyLink scene cancels every held command.
 
-1. the address or the System ID is missing in the configuration (nothing is
-   sent);
+They are refused (an error in Gladys) in these cases, and only these:
+
+1. the address or the System ID is missing in the configuration, or the
+   configuration could not be read from Gladys yet (nothing is sent);
 2. the value received is not "close" or "stop";
-3. a newer command of the same shade has already left (the newest wins);
-4. the bridge answers an error (System ID refused, shade unknown to the
-   bridge): the message says so;
-5. the bridge could not be reached within 3.5 s of the click (tries every
-   250 ms): the command is then **held** and tried again 2, 5 and 10 s later.
-   A held close is written to `/data` and leaves again after a restart, within
-   two minutes of the click. A held stop is dropped 15 s after the click:
-   later, the shade has finished its travel and the "stop" would move it to
-   its favourite position.
+3. a newer command of the same shade has already left;
+4. the bridge answers an error or an unexpected answer (System ID refused,
+   shade unknown to the bridge): the message says so;
+5. **stop** written without an answer of the bridge: error "check the shade";
+   it is **never sent again** (at rest, stop moves the shade to its favourite
+   position);
+6. **stop** not sent within 3.5 s (bridge not reachable, tries every 250 ms):
+   it is held and tried again from 4 s, **never written later than 8 s after
+   the click** (later, the shade has often finished its travel and the stop
+   would move it to its favourite position);
+7. **close** without an answer of the bridge within 3.5 s: it is written
+   again on a new connection within that time, then held and tried again 5, 12
+   and 25 s after the click (3 s each, until about 30 s).
+
+A held command lives **in memory only**: if the integration restarts, it is
+lost, never replayed; the badge of the shade then says "not sent or not
+confirmed: check the shade".
 
 ## Open, favourite position, scenes
 
-They are refused, nothing sent, when: the address or the System ID is
-missing; the bridge refused the System ID; the shade or scene is not in the
-list read from the bridge (Scan button of the Discovery tab); 32 commands are
-already waiting; a newer stop or close of the same shade came before they
-left; they could not leave within 3.5 s (bridge busy or not reachable). They
-are never tried again.
+They are refused, nothing sent, when: the address or the System ID is missing
+or the configuration is not read yet; the bridge refused the System ID; the
+shade or scene is not in the list read from the bridge (Scan button of the
+Discovery tab); 32 commands are already waiting; a newer stop or close of the
+same shade (for a scene: of any shade) arrived before they left; they could not
+leave within 3.5 s (bridge busy or not reachable). Written without an answer of
+the bridge, they show an error "state unknown". They are never tried again.
+
+## Direction of each shade
+
+Check the direction of each shade before using it in a scene: on a motor
+wired the other way round, "close" opens. Home Assistant has a "reverse"
+option; it is planned here later.
 
 ## System ID refused
 
 When the bridge refuses the System ID, the integration stops reading the
 bridge (the refusal is kept in `/data` as an 8-bit marker that cannot give the
-System ID back) until you save another System ID or **Test the connection**
-succeeds. Stop and close are still sent.
+System ID back) until you save another System ID, **Test the connection**
+succeeds, or the bridge answers a command without an error. Stop and close are
+still sent.
 
 ## Privacy
 
 Everything stays on your local network. `/data` holds the time of the last
 read, the list of shades and scenes (ids and names), the last command of each
-shade and the held closes; never the System ID.
+shade and the commands left "not sent" (for the badge, never sent again);
+never the System ID.

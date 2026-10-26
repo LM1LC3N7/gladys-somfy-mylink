@@ -17,8 +17,11 @@ the notes of the version's GitHub Release.
   the local network (Synergy API, TCP port 44100).
 - The assumed state of each shade on its badge (RTS gives no feedback: never
   shown as confirmed, no position).
-- Stop and close ahead of everything, tried again within 3.5 s, then held
-  (a held close survives a restart; a held stop is dropped after 15 s).
-- One connection at a time to the bridge; a scene of five shades fits the
-  deadlines; a refused System ID stops the reads until it changes.
+- Stop and close ahead of the other commands, tried again within 3.5 s, then
+  held in memory only (a stop never later than 8 s after the click, never
+  written twice; a close tried again until about 30 s); never replayed after
+  a restart; any newer click on the shade, or a MyLink scene, cancels it.
+- One connection and one request at a time to the bridge; a command without
+  an answer of the bridge is shown as an error, never as a success; a
+  refused System ID stops the reads until it changes.
 - Documentation in English and French, cover image.

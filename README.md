@@ -12,7 +12,8 @@ bridge** yet.
 - RTS motors give **no feedback**: Gladys shows the last command as an
   **assumed** state (badge with an orange dot), never a confirmed one, and
   there is no position.
-- Stop and close go first, are tried again within 3.5 s, then held (see the
+- Stop and close go first, one request at a time, tried again within 3.5 s,
+  then held in memory only, never replayed after a restart (see the
   guide for the exact cases where they are refused).
 - The System ID is kept by Gladys in its database and only ever sent to the
   bridge: never logged, never in `/data`.

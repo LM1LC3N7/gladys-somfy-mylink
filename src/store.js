@@ -11,13 +11,14 @@
 //     commands and the Discovery tab work before the first read;
 //   - `assumed`: per shade, the last command sent and when (the bridge gives
 //     no state: this is all there is to show);
-//   - `holds`: the CLOSE commands not written yet (tried again after a
-//     restart within two minutes of the click).
+//   - `lost`: per shade, a stop or close that could not be sent (held when
+//     the integration stopped): shown "not sent" on the badge, NEVER sent
+//     again after a restart.
 // Never the System ID. Readable by the container user only (0600).
 // -----------------------------------------------------------------------------
 
 import { readFile, rename, writeFile } from 'node:fs/promises';
-import { COMMANDS, LIMITS, TIMINGS } from './constants.js';
+import { COMMANDS, LIMITS, PROTECTIVE } from './constants.js';
 import { SCENE_ID, TARGET_ID, cleanText } from './mylink/protocol.js';
 
 export const STATE_FILE = '/data/somfy-mylink-state.json';
@@ -106,22 +107,12 @@ export function normalizeMemory(raw, now) {
       assumed.set(id, { command: a.command, at, answer: a.answer === 'ok' ? 'ok' : 'none' });
     }
   }
-  const holds = [];
-  for (const entry of list(data.holds).slice(0, LIMITS.shades)) {
-    const h = object(entry);
-    const at = time(h.at, now);
-    if (
-      typeof h.target === 'string' &&
-      TARGET_ID.test(h.target) &&
-      h.command === COMMANDS.CLOSE &&
-      at !== undefined &&
-      now - at < TIMINGS.closeHoldMax &&
-      Number.isSafeInteger(h.tries) &&
-      h.tries >= 0 &&
-      h.tries < TIMINGS.holdRetries.length &&
-      !holds.some((x) => x.target === h.target)
-    ) {
-      holds.push({ target: h.target, command: COMMANDS.CLOSE, at, tries: h.tries });
+  // `holds` of older versions is ignored: a held command is never sent again
+  // after a restart. Only "not sent" is kept, for the badge.
+  const lost = {};
+  for (const [id, command] of Object.entries(object(data.lost)).slice(0, LIMITS.shades * 2)) {
+    if (TARGET_ID.test(id) && PROTECTIVE.has(command) && Object.keys(lost).length < LIMITS.shades) {
+      lost[id] = command;
     }
   }
   return {
@@ -132,6 +123,6 @@ export function normalizeMemory(raw, now) {
     scenes: [...scenes.values()],
     listedAt: time(data.listedAt, now) ?? null,
     assumed: Object.fromEntries(assumed),
-    holds,
+    lost,
   };
 }

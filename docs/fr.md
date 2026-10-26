@@ -51,8 +51,10 @@ position, et le pont dit seulement qu'il a pris la commande. Donc :
 - le badge de chaque volet (point orange) dit « État supposé » avec la
   dernière commande et si le pont l'a acceptée ;
 - aucune commande ne peut être « confirmée par une relecture » : une commande
-  réussie veut dire « acceptée par le pont », et sans réponse du pont elle est
-  dite « envoyée, sans réponse du pont », jamais « non envoyée ».
+  réussie veut dire « acceptée par le pont » (il a répondu). Sans réponse du
+  pont, Gladys affiche une erreur « envoyé, mais le pont n'a pas répondu :
+  état inconnu » (la commande a pu partir : elle n'est jamais dite « non
+  envoyée »).
 
 **Stop et position favorite** : sur un moteur RTS, c'est le même bouton
 « my ». Pendant un mouvement, il arrête le volet ; à l'arrêt, il l'envoie à sa
@@ -61,47 +63,73 @@ quand le volet est immobile le déplace donc vers sa position favorite.
 
 ## Arrêt et fermeture
 
-L'arrêt et la fermeture passent **avant** tout le reste : une lecture en cours
-est coupée, une connexion sans réponse depuis une seconde est fermée puis
-rouverte, et ils n'attendent ni la liste des volets, ni le System ID validé
-par une lecture, ni une lecture récente. Un seul échange à la fois avec le
-pont (il n'accepte qu'une connexion) ; plusieurs commandes simultanées (une
-scène Gladys sur cinq volets) partent à la suite sur la même connexion.
+L'arrêt et la fermeture passent **avant** les autres commandes : une lecture
+en cours est coupée, et ils n'attendent ni la liste des volets, ni le System ID
+validé par une lecture, ni une lecture récente. Le pont n'accepte qu'une
+connexion, et l'intégration n'y envoie **qu'une requête à la fois**, chacune
+après la réponse du pont à la précédente. Si la requête en cours n'a pas de
+réponse depuis une seconde, la connexion est coupée, et l'arrêt ou la
+fermeture part sur une nouvelle connexion une fois l'ancienne fermée. Une
+scène Gladys sur cinq volets prend donc cinq fois le temps de réponse du pont ;
+ce qui n'a pas pu partir dans les 3,5 s est gardé (voir plus bas).
 
-Ils sont refusés dans ces cas, et seulement ceux-là :
+**La plus récente gagne, dès son arrivée** : tout nouveau clic sur un volet
+(ouvrir, fermer, stop, position favorite), qu'il parte ou non, annule la
+commande gardée de ce volet ; lancer une scène MyLink annule toutes les
+commandes gardées.
 
-1. l'adresse ou le System ID manque dans la configuration (rien n'est envoyé) ;
+Ils sont refusés (message d'erreur dans Gladys) dans ces cas, et seulement
+ceux-là :
+
+1. l'adresse ou le System ID manque dans la configuration, ou la configuration
+   n'a pas encore pu être lue auprès de Gladys (rien n'est envoyé) ;
 2. la valeur reçue n'est pas « fermer » ou « stop » ;
-3. une commande plus récente du même volet est déjà partie (la plus récente
-   gagne) ;
-4. le pont répond une erreur (System ID refusé, volet inconnu du pont) : le
-   message le dit ;
-5. le pont n'a pas pu être joint dans les 3,5 s qui suivent le clic (essais
-   toutes les 250 ms) : la commande est alors **gardée** et réessayée 2, 5 et
-   10 s plus tard. Une fermeture gardée est notée dans `/data` et repart
-   après un redémarrage, dans les deux minutes du clic. Un arrêt gardé est
-   abandonné 15 s après le clic : plus tard, le volet a fini sa course et le
-   « stop » le déplacerait vers sa position favorite.
+3. une commande plus récente du même volet est déjà partie ;
+4. le pont répond une erreur ou une réponse inattendue (System ID refusé,
+   volet inconnu du pont) : le message le dit ;
+5. **stop** écrit sans réponse du pont : erreur « vérifiez le volet » ; il
+   n'est **jamais renvoyé** (à l'arrêt, stop envoie le volet à sa position
+   favorite) ;
+6. **stop** pas parti dans les 3,5 s (pont injoignable, essais toutes les
+   250 ms) : il est gardé et réessayé à partir de 4 s, **jamais écrit plus de
+   8 s après le clic** (au-delà, le volet a souvent fini sa course et le stop
+   le déplacerait vers sa position favorite) ;
+7. **fermeture** sans réponse du pont dans les 3,5 s : elle est réécrite sur
+   une nouvelle connexion dans ce délai, puis gardée et réessayée 5, 12 et
+   25 s après le clic (3 s chaque fois, jusqu'à environ 30 s).
+
+Une commande gardée vit **en mémoire seulement** : si l'intégration redémarre,
+elle est perdue, jamais rejouée ; le badge du volet indique alors « non envoyé
+ou non confirmé : vérifiez le volet ».
 
 ## Ouverture, position favorite, scènes
 
-Elles sont refusées, sans rien envoyer, si : l'adresse ou le System ID manque ;
-le pont a refusé le System ID ; le volet ou la scène n'est pas dans la liste
-lue sur le pont (bouton Scanner de l'onglet Découverte) ; 32 commandes
-attendent déjà ; un arrêt ou une fermeture plus récent du même volet est
+Elles sont refusées, sans rien envoyer, si : l'adresse ou le System ID manque
+ou la configuration n'est pas encore lue ; le pont a refusé le System ID ; le
+volet ou la scène n'est pas dans la liste lue sur le pont (bouton Scanner de
+l'onglet Découverte) ; 32 commandes attendent déjà ; un arrêt ou une fermeture
+plus récent du même volet (pour une scène : de n'importe quel volet) est
 arrivé avant leur envoi ; elles n'ont pas pu partir dans les 3,5 s (pont
-occupé ou injoignable). Elles ne sont jamais réessayées.
+occupé ou injoignable). Écrites sans réponse du pont, elles s'affichent en
+erreur « état inconnu ». Elles ne sont jamais réessayées.
+
+## Sens de chaque volet
+
+Vérifiez le sens de chaque volet avant de vous en servir dans une scène : sur
+un moteur câblé à l'envers, « fermer » ouvre. Home Assistant a une option
+d'inversion ; elle est prévue ici plus tard.
 
 ## System ID refusé
 
 Si le pont refuse le System ID, l'intégration s'arrête de lire le pont (le
 refus est gardé dans `/data` sous une marque de 8 bits qui ne permet pas de
 retrouver le System ID) jusqu'à ce que vous enregistriez un autre System ID ou
-que **Tester la connexion** réussisse. L'arrêt et la fermeture sont quand même
-envoyés.
+que **Tester la connexion** réussisse, ou que le pont réponde sans erreur à une
+commande. L'arrêt et la fermeture sont quand même envoyés.
 
 ## Confidentialité
 
 Tout reste sur votre réseau local. `/data` contient l'heure de la dernière
 lecture, la liste des volets et des scènes (identifiants et noms), la dernière
-commande de chaque volet et les fermetures gardées ; jamais le System ID.
+commande de chaque volet et les commandes restées « non envoyées » (pour le
+badge, jamais renvoyées) ; jamais le System ID.

@@ -64,7 +64,7 @@ export const COMMANDS = {
   SCENE: 'scene',
 };
 
-/** Stop and close: the protective commands (never queued behind anything). */
+/** Stop and close: the protective commands (ahead of every other command). */
 export const PROTECTIVE = new Set([COMMANDS.STOP, COMMANDS.CLOSE]);
 
 export const LIMITS = {
@@ -89,27 +89,28 @@ export const TIMINGS = {
   /** TCP connection to the bridge. */
   connectTimeout: 3 * SECOND,
   /**
-   * An answer of the bridge to a request written (the bridge answers in
-   * order: the fifth of five requests waits for the four before it).
+   * ONE request in flight per connection (pysomfymylink does the same: a
+   * bridge that reads everything waiting on its socket at once may drop
+   * requests glued together). An ordinary command waits this long for its
+   * answer.
    */
-  replyTimeout: 8 * SECOND,
+  replyTimeout: 2500,
+  /**
+   * A protective command waits this long for its answer; a CLOSE without an
+   * answer is written again on a new connection within its budget.
+   */
+  protectiveReplyTimeout: 1500,
   /**
    * A read (list of shades and scenes) waits at most this long for its
    * answers; it is cut at once by any command.
    */
   readTimeout: 6 * SECOND,
   /**
-   * A connection whose requests got no byte for this long is cut before a
-   * protective command, which then opens a new one (after the old one is
-   * closed).
+   * A protective command waiting behind a request that got no answer for
+   * this long since it was written cuts that connection (by a timer), waits
+   * until it is closed and goes on a new one.
    */
   staleAfter: SECOND,
-  /**
-   * The next command is written after the answer to the previous one, or
-   * this long after it at most (a scene of five shades with slow answers
-   * still fits the deadlines; the bridge handles them in order).
-   */
-  pipelineAfter: 400,
   /** A connection with nothing to send nor to wait for is closed this long after. */
   idleClose: 100,
   /**
@@ -122,20 +123,22 @@ export const TIMINGS = {
   /** A protective command that could not be written is tried again this often within its budget. */
   protectiveRetry: 250,
   /**
-   * A protective command still not written at its deadline is held and
-   * tried again at these delays after the deadline (3 times at most).
+   * A CLOSE not confirmed by an answer of the bridge within its budget is
+   * held and tried again at these times AFTER THE CLICK (each try lasting
+   * `holdTryBudget`): the last try ends about 28 s after the click. Any
+   * newer command of that shade, or any MyLink scene, drops it on arrival.
+   * Never kept across a restart.
    */
-  holdRetries: [2 * SECOND, 5 * SECOND, 10 * SECOND],
-  /** Budget of one of those tries. */
+  closeRetriesAt: [5 * SECOND, 12 * SECOND, 25 * SECOND],
   holdTryBudget: 3 * SECOND,
   /**
-   * A held STOP is dropped this long after the click: on an RTS motor at
-   * rest, "stop" is the "my" button and moves the shade to its favourite
-   * position, so a late STOP is a move nobody asked for.
+   * A STOP not written within its budget is tried again from this time after
+   * the click, and never written later than `stopHoldMax` after the click:
+   * on an RTS motor at rest, "stop" is the "my" button and moves the shade
+   * to its favourite position, and a full travel lasts 10 to 25 s.
    */
-  stopHoldMax: 15 * SECOND,
-  /** A held CLOSE (harmless when repeated) survives a restart for this long. */
-  closeHoldMax: 2 * MINUTE,
+  stopRetryAt: 4 * SECOND,
+  stopHoldMax: 8 * SECOND,
   /** The last read time is written to /data at most this often. */
   attemptPersistEvery: MINUTE,
   /** "Test the connection" and a changed configuration read at most this often. */

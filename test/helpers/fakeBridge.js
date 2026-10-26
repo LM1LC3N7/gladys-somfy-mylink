@@ -61,6 +61,18 @@ export async function startBridge({ answer = defaultAnswer, port = 0 } = {}) {
     maxOpen: 0,
     /** The bridge processes one request at a time per connection, like a serial device. */
     serial: true,
+    /**
+     * 'stream': cuts the stream into objects (like the integration).
+     * 'naive': reads everything waiting on the socket at once and
+     * JSON.parse()s it, like a simple firmware loop: two requests glued
+     * together are dropped, unanswered.
+     */
+    mode: 'stream',
+    /** Requests answered without error (the moves really "transmitted"). */
+    executed: [],
+    /** Requests in flight on one connection at most (written, not answered yet). */
+    inFlight: 0,
+    maxInFlight: 0,
     sockets: new Set(),
     port: 0,
     server: undefined,
@@ -79,7 +91,62 @@ export async function startBridge({ answer = defaultAnswer, port = 0 } = {}) {
       bridge.open -= 1;
       bridge.sockets.delete(socket);
     });
+    let flight = 0;
+    const take = (request) => {
+      flight += 1;
+      bridge.inFlight = flight;
+      bridge.maxInFlight = Math.max(bridge.maxInFlight, flight);
+      bridge.requests.push({
+        method: request.method,
+        params: request.params,
+        id: request.id,
+        at: performance.now(),
+        conn: bridge.connections.indexOf(record),
+      });
+      return async () => {
+        const out = await bridge.answer(request, bridge);
+        flight -= 1;
+        if (out === 'silent' || socket.destroyed) return;
+        if (out === 'close') {
+          socket.destroy();
+          return;
+        }
+        if (!out.error && out.result !== false) {
+          bridge.executed.push({
+            method: request.method,
+            params: request.params,
+            at: performance.now(),
+          });
+        }
+        socket.write(JSON.stringify({ ...out, id: request.id }));
+      };
+    };
+    let waiting = '';
+    let busy = false;
+    const naive = async () => {
+      if (busy) return;
+      busy = true;
+      while (waiting !== '') {
+        const text = waiting;
+        waiting = '';
+        let request;
+        try {
+          request = JSON.parse(text);
+        } catch {
+          bridge.dropped = (bridge.dropped ?? 0) + 1;
+          continue;
+        }
+        await take(request)().catch(() => {});
+      }
+      busy = false;
+    };
     socket.on('data', (chunk) => {
+      if (bridge.mode === 'naive') {
+        waiting += chunk.toString('utf8');
+        // One firmware loop turn: what has arrived by now is read at once.
+        setImmediate(() => naive().catch(() => {}));
+        return;
+      }
       let texts;
       try {
         texts = scanner.push(chunk);
@@ -88,23 +155,7 @@ export async function startBridge({ answer = defaultAnswer, port = 0 } = {}) {
         return;
       }
       for (const text of texts) {
-        const request = JSON.parse(text);
-        bridge.requests.push({
-          method: request.method,
-          params: request.params,
-          id: request.id,
-          at: performance.now(),
-          conn: bridge.connections.indexOf(record),
-        });
-        const reply = async () => {
-          const out = await bridge.answer(request, bridge);
-          if (out === 'silent' || socket.destroyed) return;
-          if (out === 'close') {
-            socket.destroy();
-            return;
-          }
-          socket.write(JSON.stringify({ ...out, id: request.id }));
-        };
+        const reply = take(JSON.parse(text));
         if (bridge.serial) {
           chain = chain.then(reply).catch(() => {});
         } else {

@@ -22,6 +22,13 @@ up to date at the end of every milestone.
       retries and holds, order rules, refused System ID kept as an 8-bit
       marker, reads paced and kept in /data, en/fr, docs, cover. Tested
       against a simulated bridge on 127.0.0.1 only.
+- [x] **Milestone 1 fixes — review 1** (2026-10-26): one request in flight
+      per connection (B1), stop/close cut a silent connection by a timer, a
+      CLOSE without answer written again, a STOP without answer acked as a
+      failure; no hold replayed after a restart (B2); no success without an
+      answer; held STOP bounded to 8 s at the write; any arrival drops the
+      hold; real retry windows in docs and messages; m1-m6; category
+      `lighting`.
 - [ ] **Milestone 2 — real bridge**: run against a real MyLink and compare
       with the app (see "To check"); turn the answers (anonymized) into
       fixtures.
@@ -34,9 +41,11 @@ up to date at the end of every milestone.
 ## To check on a real bridge
 
 - Whether the bridge accepts a request written before the answer to the
-  previous one on the same connection (the link writes the next command after
-  the answer or 400 ms after the previous write, and a stop at once). If not,
-  the pipelining must go and a scene of five shades needs another answer.
+  previous one on the same connection. Until then ONE request is in flight
+  (review r1, B1): a scene of five shades takes five answer times, and what
+  does not leave within 3.5 s is held (closes) or refused.
+- What `result: false` (or an answer without `result`) means: taken as
+  "unexpected answer of the bridge" for now, never as accepted.
 - How long the bridge takes to answer a move and `status.info` (pysomfymylink
   says 1 to 2 s for the list); whether it closes the socket after each answer.
 - The exact format of the `targetID` (bridge id, a dot, the channel) and of
@@ -59,34 +68,42 @@ up to date at the end of every milestone.
   without answer"; the badge shows the assumed state; no position feature;
   `has_feedback: false` (Gladys keeps the last command as the value: the docs
   say it is the last command, not a measure).
-- **Held STOP limited to 15 s** after the click, instead of "held and re-sent
-  by the next read": on an RTS motor at rest, stop is the "my" button and
-  would move the shade to its favourite position. A held CLOSE (harmless when
-  repeated) is kept in /data for two minutes and survives a restart. Retries
-  at 2, 5 and 10 s after the deadline rather than at the next read (the read
-  interval is 60 s to 1 h).
+- **Holds (review r1)**: a STOP is never written twice (at rest it is the
+  RTS "my" button); not written within 3.5 s it is tried again from 4 s and
+  never written later than 8 s after the click (checked at the write);
+  written without an answer it is acked as a failure. A CLOSE is a movement
+  too (pinching, someone locked out on a balcony): without an answer it is
+  written again within 3.5 s, then held and tried at 5, 12 and 25 s after
+  the click, in this session only. Any command arriving for that shade, or
+  any MyLink scene, drops the hold. Nothing is ever replayed after a restart:
+  /data keeps only "not sent" for the badge.
+- **Success = answered by the bridge**: written without an answer, every
+  command is acked as a failure that says it may have left.
 - **Favourite position** is a `button/push` sending `mylink.move.stop` (the
   same RTS order as stop): an ordinary command (one try, cancelled by a newer
   stop or close), not a protective one.
 - **Protective commands are sent even with a refused System ID marker** (one
   local bridge, no lockout to fear, and the marker may be a 1-in-256
-  collision); the opens, favourites and scenes are refused.
+  collision); the opens, favourites and scenes are refused. An answer of the
+  bridge without error to any command clears the marker.
 - **Identity**: the System ID is checked by the bridge on every request and
   the `targetID` starts with the id of the bridge, so a DHCP swap to another
   bridge answers "Invalid auth" or "unknown target". Opens need the shade in
   the list read (kept in /data); stop and close need nothing.
-- **One connection at a time, written in order**: protective at once, other
-  commands after the previous answer or 400 ms, reads only on an idle link and
-  cut by any command (a cut read is not a failure and waits for the next
-  interval). A connection silent for 1 s with requests waiting is cut before
-  the next command; a new connection opens only after the old one closed.
+- **One connection, one request in flight**: protective commands first, then
+  the others, each after the answer to the previous one; reads only on an
+  idle link and cut by any command (a cut read is not a failure and waits for
+  the next interval). Only a protective command cuts a connection whose
+  request got no answer for 1 s (by a timer); ordinary commands wait for the
+  answer (2.5 s at most). A new connection opens only after the old one
+  closed.
 - **Reads**: the list of shades and scenes only (no state exists), every
   60 s to 1 h (300 s by default); Test, Scan and a new configuration at most
   once a minute; the time of the last read written to /data BEFORE the read.
 - **Refused System ID**: 8 bits of its SHA-256 in /data (a brute force gives
   hundreds of candidates); cleared by a successful read (Test button) or a
   different System ID.
-- **Category** `appliances` (like the other shade integrations).
+- **Category** `lighting` (catalog spec §3: lights, plugs, relays and shutters/blinds; review r1).
 - **Store fields for Gladys >= 5.3.0** (not set yet, the manifest stays
   `>=5.1.0`): `keywords` somfy, mylink, rts, volet, store, shutter, blind,
   synergy; `countries` FR, BE, CH, DE, NL, GB, US.

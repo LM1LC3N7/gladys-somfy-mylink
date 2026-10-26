@@ -17,27 +17,29 @@
 // until the System ID changes or the Test button reads with success. A read
 // is cut by any command.
 //
-// Commands (one link per bridge: src/mylink/link.js):
+// Commands (one link per bridge, one request in flight: src/mylink/link.js):
 //   - STOP and CLOSE (protective) depend on no option, no read and no
-//     earlier answer: written at once on the open connection, ahead of
-//     everything, from the start (the ids are in the external ids). A
-//     failed connection is tried again every 250 ms within 3.5 s of the
-//     click; past that, the command is held and tried again 2, 5 and 10 s
-//     later. A held STOP is dropped 15 s after the click (a STOP to a motor
-//     at rest is the RTS "my" button: it would move the shade to its
-//     favourite position); a held CLOSE is kept in /data and tried again
-//     after a restart within two minutes of the click;
+//     refused-System-ID marker: ahead of every other command, from the start
+//     (the ids are in the external ids). A failed connection is tried again
+//     every 250 ms within 3.5 s of the click. A CLOSE without an answer of
+//     the bridge is written again within that budget, then held and tried
+//     again 5, 12 and 25 s after the click (3 s each). A STOP is never
+//     written twice (a STOP to a motor at rest is the RTS "my" button: it
+//     moves the shade to its favourite position): written without an answer
+//     it is acked as a failure; not written in its budget, it is tried again
+//     from 4 s and never written later than 8 s after the click. Holds live
+//     in memory only: a restart drops them (the badge says "not sent");
 //   - the others (open, favourite position, scene) are decided on the list
 //     read from the bridge (the shade or scene in it) and on a System ID
 //     not refused; written within 3.5 s of the click or refused unsent;
-//   - order: every command is numbered at its arrival. A stop or close
-//     cancels the older commands of that shade not written yet (and the
-//     older scenes); an older command is never written after a newer stop or
-//     close of its shade; a newer command really written drops a held stop
-//     or close of its shade;
-//   - a command whose bytes may have left is never told "not sent": without
-//     an answer of the bridge it is "sent, without answer" (the ack never
-//     waits past 4.3 s, nor for a publication to Gladys).
+//   - order: every command is numbered at its arrival. Any command arriving
+//     for a shade drops the held command of that shade, a MyLink scene drops
+//     them all, sent or not. A stop or close cancels the older commands of
+//     that shade not written yet (and the older scenes); an older command is
+//     never written after a newer one of its shade;
+//   - success means "answered by the bridge": a command written without an
+//     answer is acked as a failure that says it may have left, never
+//     "not sent" (the ack never waits past 4.3 s, nor for a publication).
 // -----------------------------------------------------------------------------
 
 import { DEVICE_TRANSPORTS, createLogger } from '@gladysassistant/integration-sdk';
@@ -83,6 +85,12 @@ const METHOD_OF = {
   [COMMANDS.SCENE]: METHODS.RUN,
 };
 
+/** The reason of a command written without an answer. */
+const REASON_NO_ANSWER = {
+  en: 'sent, the bridge did not answer',
+  fr: 'envoyé, le pont n’a pas répondu',
+};
+
 /** Reads that did not happen because of a command: not a failure. */
 const NOT_A_FAILURE = new Set(['preempted', 'cancelled', 'late']);
 
@@ -124,12 +132,17 @@ export class MyLinkApp {
     this.seq = 0;
     /** shade id -> number of its last stop or close (arrived). */
     this.lastProtective = new Map();
+    /** shade id -> number of its last command arrived; the last scene arrived. */
+    this.lastArrived = new Map();
+    this.lastSceneArrived = 0;
     /** The number of the last stop or close of any shade (scenes are older or newer than it). */
     this.lastAnyProtective = 0;
     /** shade id -> number of its last command written. */
     this.lastWritten = new Map();
     /** shade id -> { target, command, seq, clickMono, at, tries, timer } */
     this.holds = new Map();
+    /** An answer of the bridge to a command since the last read. */
+    this.answered = false;
     /** shade id -> the command that could not be sent at all. */
     this.lost = new Map();
     /** device external id -> device published in this run (a publication never shrinks). */
@@ -191,21 +204,10 @@ export class MyLinkApp {
           mono - (now - this.memory.lastAttemptAt) + this.timings.attemptPersistEvery,
         );
       }
-      // The CLOSE commands not written before the restart: tried again at once.
-      for (const kept of this.memory.holds) {
-        if (!this.holds.has(kept.target)) {
-          this.seq += 1;
-          this.holds.set(kept.target, {
-            target: kept.target,
-            command: COMMANDS.CLOSE,
-            seq: this.seq,
-            clickMono: mono - (now - kept.at),
-            at: kept.at,
-            tries: kept.tries,
-            timer: undefined,
-            first: true,
-          });
-        }
+      // The commands held when the integration stopped are NEVER sent again
+      // (nobody is behind them any more): only their badge says "not sent".
+      for (const [target, command] of Object.entries(this.memory.lost)) {
+        this.lost.set(target, command);
       }
     }
     if (generation !== this.generation) {
@@ -217,8 +219,7 @@ export class MyLinkApp {
     this.badges = undefined;
     this.lastStatus = undefined;
     for (const hold of this.holds.values()) {
-      this.armHold(hold, hold.first ? 0 : undefined);
-      hold.first = false;
+      this.armHold(hold);
     }
     await this.publishAll();
     if (generation !== this.generation) {
@@ -308,9 +309,13 @@ export class MyLinkApp {
 
   /** Saves /data; the System ID is never in it. */
   async saveMemory() {
-    this.memory.holds = [...this.holds.values()]
-      .filter((h) => h.command === COMMANDS.CLOSE)
-      .map((h) => ({ target: h.target, command: h.command, at: h.at, tries: h.tries }));
+    // A held command is kept as "not sent" only: never written again after
+    // a restart.
+    const lost = Object.fromEntries(this.lost);
+    for (const hold of this.holds.values()) {
+      lost[hold.target] = hold.command;
+    }
+    this.memory.lost = lost;
     await this.store
       .save(this.memory)
       .catch((err) => this.logger.warn(`Saving the state to /data failed: ${err.message}`));
@@ -433,6 +438,7 @@ export class MyLinkApp {
         this.logger.warn(`Reading the bridge failed: ${reasonOf(err).en}`);
       }
       this.lastRead = { ok: false, err };
+      this.answered = false;
       await this.publishAll();
       return;
     }
@@ -440,6 +446,7 @@ export class MyLinkApp {
       return;
     }
     this.lastRead = { ok: true };
+    this.answered = false;
     this.memory.shades = shades;
     if (scenes !== undefined) {
       this.memory.scenes = scenes;
@@ -577,7 +584,9 @@ export class MyLinkApp {
 
   /** The badge of a created device. */
   badgeOf(target) {
-    const reachable = Boolean(this.link) && !this.refused() && this.lastRead?.ok !== false;
+    // A read that failed, or an answer of the bridge to a command since.
+    const reachable =
+      Boolean(this.link) && !this.refused() && (this.lastRead?.ok !== false || this.answered);
     if (!reachable) {
       return { transport: DEVICE_TRANSPORTS.UNREACHABLE };
     }
@@ -716,31 +725,55 @@ export class MyLinkApp {
       throw this.refusal(ERRORS.readOnly);
     }
     const command = this.commandOf(target, value);
-    if (PROTECTIVE.has(command)) {
-      return this.protect(target.id, command, received);
+    this.seq += 1;
+    const seq = this.seq;
+    if (target.kind === 'shade') {
+      this.lastArrived.set(target.id, seq);
+    } else {
+      this.lastSceneArrived = seq;
     }
-    return this.move(target, command, received);
+    // The newest wins from its arrival, whether it leaves or not: a command
+    // for a shade drops the held one of that shade; a MyLink scene (whose
+    // shades are unknown) drops them all.
+    for (const hold of [...this.holds.values()]) {
+      if (target.kind === 'scene' || hold.target === target.id) {
+        this.dropHold(hold);
+        this.logger.info(`Held ${hold.command} dropped by a newer command: ${hold.target}`);
+        this.afterCommand();
+      }
+    }
+    if (PROTECTIVE.has(command)) {
+      return this.protect(target.id, command, received, seq);
+    }
+    return this.move(target, command, received, seq);
   }
 
   /**
    * The order rules, asked right before the bytes are written (no await in
-   * between). `key`: the shade, or null for a scene.
+   * between). `key`: the shade, or null for a scene. `tag.why` tells why a
+   * request is cancelled; `tag.notAfter`: never written after it (a STOP).
    */
-  beforeSend(key, seq, protective) {
+  beforeSend(key, seq, protective, tag) {
     if (!protective) {
-      if (key === null ? this.lastAnyProtective > seq : (this.lastProtective.get(key) ?? 0) > seq) {
+      if (key === null && this.lastAnyProtective > seq) {
+        tag.why = 'sceneAfter';
         return false;
       }
-    } else if ((this.lastWritten.get(key) ?? 0) > seq) {
+      if (key !== null && (this.lastProtective.get(key) ?? 0) > seq) {
+        tag.why = 'newerProtective';
+        return false;
+      }
+    }
+    if (key !== null && (this.lastWritten.get(key) ?? 0) > seq) {
+      tag.why = 'newerLeft';
+      return false;
+    }
+    if (tag.notAfter !== undefined && this.monotonic() >= tag.notAfter) {
+      tag.why = 'late';
       return false;
     }
     if (key !== null) {
       this.lastWritten.set(key, seq);
-      const hold = this.holds.get(key);
-      if (hold && hold.seq < seq) {
-        // A newer command of this shade really leaves: the held one is dropped.
-        this.dropHold(hold);
-      }
       this.lost.delete(key);
     }
     return true;
@@ -749,7 +782,7 @@ export class MyLinkApp {
   /**
    * Waits for a command until its answer deadline. `{ status: 'ok' }`,
    * `'noReply'` (written, no answer), `'refused'` (the bridge answered an
-   * error) or `'notSent'` (with the error).
+   * error or an unexpected value) or `'notSent'` (with the error).
    */
   async outcome(promise, answerBy, sent, cancel) {
     let timer;
@@ -764,7 +797,7 @@ export class MyLinkApp {
         (value) => ({ status: 'ok', value }),
         (err) => {
           if (err?.written) {
-            return err.kind === 'auth' || err.kind === 'api'
+            return ['auth', 'api', 'unexpected'].includes(err.kind)
               ? { status: 'refused', err }
               : { status: 'noReply', err };
           }
@@ -783,6 +816,49 @@ export class MyLinkApp {
     // Not written by its deadline: taken out, never sent late.
     cancel();
     return { status: 'notSent', err: { kind: 'late' } };
+  }
+
+  /** One request of a command on the link, with the order rules; its outcome. */
+  async send(
+    link,
+    { method, params, kind, key, seq, deadline, answerBy, retry = false, notAfter },
+  ) {
+    const tag = { key, seq, why: undefined, notAfter };
+    let written = false;
+    const promise = link.request(method, params, {
+      kind,
+      deadline,
+      retry,
+      tag,
+      beforeSend: () => {
+        written = this.beforeSend(key, seq, kind === 'protective', tag);
+        return written;
+      },
+    });
+    const result = await this.outcome(
+      promise,
+      answerBy,
+      () => written,
+      () => link.cancel((job) => job.tag === tag, 'late'),
+    );
+    if (result.status === 'notSent' && result.err?.kind === 'cancelled') {
+      result.why = tag.why ?? result.err.why;
+    }
+    if (result.status === 'ok') {
+      this.bridgeAnswered();
+    }
+    return result;
+  }
+
+  /** The bridge answered a command: reachable, and its System ID accepted. */
+  bridgeAnswered() {
+    this.answered = true;
+    if (this.memory.refused && this.refused()) {
+      this.memory.refused = null;
+      this.lastStatus = undefined;
+      this.updateStatus().catch(() => {});
+      this.scheduleRead();
+    }
   }
 
   /** Remembers the command sent to a shade (the assumed state). */
@@ -813,9 +889,9 @@ export class MyLinkApp {
     }
   }
 
-  notSentError(err) {
+  notSentError(err, why) {
     if (err?.kind === 'cancelled') {
-      return ERRORS.cancelled;
+      return ERRORS.cancelled[why] ?? ERRORS.late;
     }
     if (err?.kind === 'late' || err === undefined) {
       return ERRORS.late;
@@ -823,11 +899,23 @@ export class MyLinkApp {
     return ERRORS.notSent(reasonOf(err));
   }
 
+  /** Why nothing can be sent at all, or undefined. */
+  blocked() {
+    if (this.configError && !this.link) {
+      return ERRORS.configNotRead;
+    }
+    if (!this.link || !this.memory) {
+      return ERRORS.notConfigured;
+    }
+    return undefined;
+  }
+
   /** Open, favourite position, scene: decided on the list read from the bridge. */
-  async move(target, command, received) {
+  async move(target, command, received, seq) {
     const link = this.link;
-    if (!link || !this.memory) {
-      throw this.refusal(ERRORS.notConfigured);
+    const blocked = this.blocked();
+    if (blocked) {
+      throw this.refusal(blocked);
     }
     if (this.refused()) {
       throw this.refusal(ERRORS.refused);
@@ -841,117 +929,121 @@ export class MyLinkApp {
     if (link.queue.filter((j) => j.kind === 'command').length >= LIMITS.queue) {
       throw this.refusal(ERRORS.queueFull);
     }
-    this.seq += 1;
-    const seq = this.seq;
-    const key = target.kind === 'shade' ? target.id : null;
-    const params =
-      target.kind === 'scene' ? { sceneID: Number(target.id) } : { targetID: target.id };
-    let written = false;
-    const tag = { key, seq };
-    const promise = link.request(METHOD_OF[command], params, {
+    const result = await this.send(link, {
+      method: METHOD_OF[command],
+      params: target.kind === 'scene' ? { sceneID: Number(target.id) } : { targetID: target.id },
       kind: 'command',
+      key: target.kind === 'shade' ? target.id : null,
+      seq,
       deadline: received + this.timings.commandSendBy,
-      tag,
-      beforeSend: () => {
-        written = this.beforeSend(key, seq, false);
-        return written;
-      },
+      answerBy: received + this.timings.commandAnswerBy,
     });
-    const result = await this.outcome(
-      promise,
-      received + this.timings.commandAnswerBy,
-      () => written,
-      () => link.cancel((job) => job.tag === tag),
-    );
     return this.conclude(target, command, result);
   }
 
   async conclude(target, command, result) {
     const shade = target.kind === 'shade' ? target.id : undefined;
     const name = shade ?? `scene ${target.id}`;
-    if (result.status === 'ok' || result.status === 'noReply') {
+    if (result.status === 'ok') {
       if (shade) {
-        this.remember(shade, command, result.status === 'ok');
+        this.remember(shade, command, true);
       }
-      this.logger.info(
-        `${command} ${result.status === 'ok' ? 'accepted by the bridge' : 'sent, without answer'}: ${name}`,
-      );
+      this.logger.info(`${command} accepted by the bridge: ${name}`);
       this.afterCommand();
       return;
+    }
+    if (result.status === 'noReply') {
+      // It may have left: the assumed state says so, the ack is a failure.
+      if (shade) {
+        this.remember(shade, command, false);
+      }
+      this.logger.warn(`${command} sent, the bridge did not answer: ${name}`);
+      this.afterCommand();
+      throw this.refusal(command === COMMANDS.STOP ? ERRORS.stopNoReply : ERRORS.noReply);
     }
     if (result.status === 'refused') {
       await this.noteRefusal(result.err);
       this.logger.warn(`${command} refused by the bridge (${reasonOf(result.err).en}): ${name}`);
       throw this.refusal(ERRORS.rejected(reasonOf(result.err)));
     }
-    this.logger.warn(`${command} not sent (${result.err?.kind ?? 'late'}): ${name}`);
-    throw this.refusal(this.notSentError(result.err));
+    this.logger.warn(`${command} not sent (${result.why ?? result.err?.kind ?? 'late'}): ${name}`);
+    throw this.refusal(this.notSentError(result.err, result.why));
   }
 
   /**
-   * Stop and close: no option, no read, no pause in the way; ahead of
-   * everything on the link; tried again within the budget, then held.
+   * Stop and close: no option, no read, no refused marker in the way; ahead
+   * of every other command; a connection tried again within the budget, a
+   * CLOSE without an answer written again; then held (in memory only).
    */
-  async protect(id, command, received) {
-    const link = this.link;
-    if (!link || !this.memory) {
-      throw this.refusal(ERRORS.notConfigured);
+  async protect(id, command, received, seq) {
+    const blocked = this.blocked();
+    if (blocked) {
+      throw this.refusal(blocked);
     }
-    this.seq += 1;
-    const seq = this.seq;
+    const link = this.link;
     this.lastProtective.set(id, seq);
     this.lastAnyProtective = seq;
     // The older commands of this shade (and the older scenes) never leave after it.
-    link.cancel(
-      (job) => job.tag && job.tag.seq < seq && (job.tag.key === id || job.tag.key === null),
-    );
-    const older = this.holds.get(id);
-    if (older) {
-      this.dropHold(older);
-    }
-    let written = false;
-    const tag = { key: id, seq, protective: true };
-    const promise = link.request(
-      METHOD_OF[command],
-      { targetID: id },
-      {
+    link.cancel((job) => job.tag && job.tag.seq < seq && job.tag.key === id, 'newerProtective');
+    link.cancel((job) => job.tag && job.tag.seq < seq && job.tag.key === null, 'sceneAfter');
+    const deadline = received + this.timings.commandSendBy;
+    let result;
+    for (;;) {
+      result = await this.send(link, {
+        method: METHOD_OF[command],
+        params: { targetID: id },
         kind: 'protective',
-        deadline: received + this.timings.commandSendBy,
+        key: id,
+        seq,
+        deadline,
+        answerBy: received + this.timings.commandAnswerBy,
         retry: true,
-        tag,
-        beforeSend: () => {
-          written = this.beforeSend(id, seq, true);
-          return written;
-        },
-      },
-    );
-    const result = await this.outcome(
-      promise,
-      received + this.timings.commandAnswerBy,
-      () => written,
-      () => link.cancel((job) => job.tag === tag),
-    );
-    if (result.status !== 'notSent' || result.err?.kind === 'cancelled') {
-      return this.conclude({ kind: 'shade', id }, command, result);
+      });
+      // A CLOSE written without an answer is written again (a new connection:
+      // the silent one was cut) within its budget; a STOP never (at rest it
+      // is the "my" button).
+      const again =
+        command === COMMANDS.CLOSE &&
+        result.status === 'noReply' &&
+        result.err !== undefined &&
+        this.monotonic() < deadline &&
+        this.link === link &&
+        this.lastArrived.get(id) === seq &&
+        this.lastSceneArrived < seq;
+      if (!again) {
+        break;
+      }
+      this.logger.warn(`close without an answer, written again: ${id}`);
     }
-    // Not written in its budget (bridge not reachable): held, tried again.
-    if (command === COMMANDS.STOP && this.monotonic() - received >= this.timings.stopHoldMax) {
-      return this.conclude({ kind: 'shade', id }, command, result);
+    const shade = { kind: 'shade', id };
+    if (result.status === 'ok' || result.status === 'refused') {
+      return this.conclude(shade, command, result);
     }
-    const hold = {
-      target: id,
-      command,
-      seq,
-      clickMono: received,
-      at: this.now() - (this.monotonic() - received),
-      tries: 0,
-      timer: undefined,
-    };
+    if (result.status === 'notSent' && result.err?.kind === 'cancelled') {
+      return this.conclude(shade, command, result);
+    }
+    if (this.lastArrived.get(id) !== seq || this.lastSceneArrived > seq) {
+      // A newer command of this shade, or a MyLink scene, arrived meanwhile: it wins.
+      return this.conclude(shade, command, result);
+    }
+    if (command === COMMANDS.STOP && result.status === 'noReply') {
+      return this.conclude(shade, command, result);
+    }
+    // Not confirmed in its budget: held, tried again in this session only.
+    if (result.status === 'noReply') {
+      this.remember(id, command, false);
+    }
+    const hold = { target: id, command, seq, clickMono: received, tries: 0, timer: undefined };
     this.holds.set(id, hold);
     this.armHold(hold);
     this.afterCommand();
-    this.logger.warn(`${command} not sent in time (${result.err?.kind ?? 'late'}), held: ${id}`);
-    throw this.refusal(ERRORS.held(reasonOf(result.err), this.timings.holdRetries.length));
+    this.logger.warn(
+      `${command} not confirmed in time (${result.err?.kind ?? 'late'}), held: ${id}`,
+    );
+    const reason = result.status === 'noReply' ? REASON_NO_ANSWER : reasonOf(result.err);
+    throw this.refusal(
+      command === COMMANDS.STOP ? ERRORS.heldStop(reason) : ERRORS.heldClose(reason),
+    );
   }
 
   dropHold(hold) {
@@ -965,25 +1057,34 @@ export class MyLinkApp {
     }
   }
 
-  /** Arms the next try of a held command (`delay`: default, the step of its try count). */
-  armHold(hold, delay) {
+  /** Arms the next try of a held command, at its time after the click; none left: lost. */
+  armHold(hold) {
     if (hold.timer) {
       this.timers.clearTimeout(hold.timer);
+      hold.timer = undefined;
     }
-    const wait = delay ?? this.timings.holdRetries[hold.tries];
-    if (wait === undefined) {
+    const offset =
+      hold.command === COMMANDS.STOP
+        ? hold.tries === 0
+          ? this.timings.stopRetryAt
+          : undefined
+        : this.timings.closeRetriesAt[hold.tries];
+    if (offset === undefined) {
       this.loseHold(hold);
       return;
     }
     const generation = this.generation;
-    hold.timer = this.timers.setTimeout(() => {
-      hold.timer = undefined;
-      if (generation === this.generation) {
-        this.retryHold(hold).catch((err) =>
-          this.logger.error(`Held command failed: ${err?.message}`),
-        );
-      }
-    }, wait);
+    hold.timer = this.timers.setTimeout(
+      () => {
+        hold.timer = undefined;
+        if (generation === this.generation) {
+          this.retryHold(hold).catch((err) =>
+            this.logger.error(`Held command failed: ${err?.message}`),
+          );
+        }
+      },
+      Math.max(0, hold.clickMono + offset - this.monotonic()),
+    );
   }
 
   loseHold(hold) {
@@ -999,65 +1100,55 @@ export class MyLinkApp {
       return;
     }
     const mono = this.monotonic();
-    if (hold.command === COMMANDS.STOP && mono - hold.clickMono >= this.timings.stopHoldMax) {
-      // A late STOP would be the "my" button of a motor at rest.
-      this.loseHold(hold);
-      return;
-    }
-    if (hold.command === COMMANDS.CLOSE && mono - hold.clickMono >= this.timings.closeHoldMax) {
-      this.loseHold(hold);
-      return;
-    }
-    if (!link) {
-      hold.tries += 1;
-      this.armHold(hold);
-      return;
-    }
     hold.tries += 1;
-    this.saveMemory().catch(() => {});
-    let written = false;
-    const tag = { key: hold.target, seq: hold.seq, protective: true };
-    const deadline = mono + this.timings.holdTryBudget;
-    const promise = link.request(
-      METHOD_OF[hold.command],
-      { targetID: hold.target },
-      {
-        kind: 'protective',
-        deadline,
-        retry: true,
-        tag,
-        beforeSend: () => {
-          written = this.beforeSend(hold.target, hold.seq, true);
-          return written;
-        },
-      },
-    );
-    const result = await this.outcome(
-      promise,
-      deadline + (this.timings.commandAnswerBy - this.timings.commandSendBy),
-      () => written,
-      () => link.cancel((job) => job.tag === tag),
-    );
-    if (this.holds.get(hold.target) !== hold) {
-      return;
-    }
-    if (result.status === 'notSent' && result.err?.kind !== 'cancelled') {
+    const stop = hold.command === COMMANDS.STOP;
+    const notAfter = stop ? hold.clickMono + this.timings.stopHoldMax : undefined;
+    // A stop tries until its bound; a close for one try budget.
+    const deadline = stop ? notAfter : mono + this.timings.holdTryBudget;
+    if (!link || deadline <= mono) {
       this.armHold(hold);
-      this.afterCommand();
       return;
     }
-    this.dropHold(hold);
-    if (result.status === 'notSent') {
-      return; // A newer command of this shade left: nothing more to do.
+    const result = await this.send(link, {
+      method: METHOD_OF[hold.command],
+      params: { targetID: hold.target },
+      kind: 'protective',
+      key: hold.target,
+      seq: hold.seq,
+      deadline,
+      answerBy: deadline + (this.timings.commandAnswerBy - this.timings.commandSendBy),
+      retry: true,
+      notAfter,
+    });
+    if (this.holds.get(hold.target) !== hold) {
+      return; // Dropped by a newer command meanwhile.
     }
-    if (result.status === 'refused') {
+    if (result.status === 'ok') {
+      this.dropHold(hold);
+      this.remember(hold.target, hold.command, true);
+      this.logger.info(`Held ${hold.command} accepted by the bridge: ${hold.target}`);
+    } else if (result.status === 'refused') {
+      this.dropHold(hold);
       await this.noteRefusal(result.err);
+      this.lost.set(hold.target, hold.command);
       this.logger.warn(`Held ${hold.command} refused by the bridge: ${hold.target}`);
-      this.afterCommand();
-      return;
+    } else if (
+      result.status === 'notSent' &&
+      result.err?.kind === 'cancelled' &&
+      result.why !== 'late'
+    ) {
+      this.dropHold(hold);
+    } else if (stop && result.status === 'noReply') {
+      // Never written twice.
+      this.dropHold(hold);
+      this.remember(hold.target, hold.command, false);
+      this.logger.warn(`Held stop sent, the bridge did not answer: ${hold.target}`);
+    } else {
+      if (result.status === 'noReply') {
+        this.remember(hold.target, hold.command, false);
+      }
+      this.armHold(hold);
     }
-    this.remember(hold.target, hold.command, result.status === 'ok');
-    this.logger.info(`Held ${hold.command} sent: ${hold.target}`);
     this.afterCommand();
   }
 }

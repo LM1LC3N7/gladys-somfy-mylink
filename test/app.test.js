@@ -291,143 +291,219 @@ test('a new System ID typed after a refusal is read again (no blind replay of th
   assert.equal(ctx.store.data.refused, null);
 });
 
-test('a close not sent in time is held, then sent when the bridge comes back; kept in /data meanwhile', async (t) => {
+test('a close not sent in time is held in memory, then sent when the bridge comes back (5 s after the click)', async (t) => {
   const port = await freePort();
   const store = memoryStore();
   const ctx = await setup(t, { port, store, wait: false, devices: [createdShade('CC0000A.1')] });
-  const { gladys } = ctx;
+  const { gladys, app } = ctx;
   const ack = await press(gladys, 'CC0000A.1', 'state', -1);
   assert.equal(ack.success, false);
-  assert.match(ack.error, /Not sent yet .*tried again 3 time/);
-  assert.deepEqual(
-    store.data.holds.map((h) => [h.target, h.command]),
-    [['CC0000A.1', 'close']],
-  );
+  assert.match(ack.error, /Close not confirmed .*5, 12 and 25 s after the click/);
+  assert.equal(app.holds.has('CC0000A.1'), true);
+  // /data never holds a command to send again: only "not sent".
+  await until(() => store.data?.lost?.['CC0000A.1'] === 'close');
+  assert.equal(store.data.holds, undefined);
   const bridge = await startBridge({ port });
   t.after(() => bridge.halt());
   await until(() => bridge.of('mylink.move.down').length === 1, 5000);
-  await until(() => store.data.holds.length === 0);
+  await until(() => app.holds.size === 0);
   assert.equal(store.data.assumed['CC0000A.1'].command, 'close');
-  await ctx.clock.wait(15_000);
+  await until(() => store.data.lost['CC0000A.1'] === undefined);
+  await ctx.clock.wait(30_000);
   assert.equal(bridge.of('mylink.move.down').length, 1, 'once');
   noSecretAnywhere(ctx);
 });
 
-test('a held close survives a restart: sent at once from /data', async (t) => {
-  const bridge = await startBridge({
-    answer: (request, b) =>
-      request.method === 'mylink.status.info' ? 'silent' : defaultAnswer(request, b),
-  });
+test('after a restart a held close is NEVER sent again (legacy holds or "not sent"): badge only', async (t) => {
   const now = speedClock(SPEED).now();
-  const store = memoryStore({
-    holds: [{ target: 'CC0000A.2', command: 'close', at: now - 30_000, tries: 1 }],
-  });
-  await setup(t, { bridge, store, wait: false });
-  await until(() => bridge.of('mylink.move.down').length === 1);
-  assert.equal(bridge.requests[0].method, 'mylink.move.down', 'before any read');
-  // Too old (more than two minutes): dropped.
-  const old = memoryStore({
-    holds: [{ target: 'CC0000A.3', command: 'close', at: now - 10 * 60_000, tries: 0 }],
-  });
-  const other = await startBridge();
-  await setup(t, { bridge: other, store: old });
-  assert.equal(other.of('mylink.move.down').length, 0);
+  for (const at of [now - 30_000, now + 3 * 3600_000]) {
+    const bridge = await startBridge();
+    const store = memoryStore({
+      holds: [{ target: 'CC0000A.2', command: 'close', at, tries: 1 }],
+      lost: { 'CC0000A.2': 'close' },
+    });
+    const ctx = await setup(t, { bridge, store, devices: [createdShade('CC0000A.2')] });
+    await ctx.clock.wait(30_000);
+    assert.equal(bridge.of('mylink.move.down').length, 0, `no close (at ${at - now})`);
+    await until(() =>
+      ctx.gladys.fake.transports.some(
+        (x) =>
+          x.device_external_id === shadeId('CC0000A.2') && /not sent/.test(x.message?.en ?? ''),
+      ),
+    );
+    await ctx.app.stop();
+  }
 });
 
-test('a held stop is dropped 15 s after the click: never a late stop (the "my" button at rest)', async (t) => {
-  const port = await freePort();
-  const ctx = await setup(t, { port, wait: false, devices: [createdShade('CC0000A.1')] });
-  const ack = await press(ctx.gladys, 'CC0000A.1', 'state', 0);
+for (const [back, sent] of [
+  [7000, 1],
+  [8300, 0],
+]) {
+  test(`a held stop is never written later than 8 s after the click (bridge back at ${back} ms: ${sent})`, async (t) => {
+    const port = await freePort();
+    const ctx = await setup(t, { port, wait: false, devices: [createdShade('CC0000A.1')] });
+    const clicked = performance.now();
+    const ack = await press(ctx.gladys, 'CC0000A.1', 'state', 0);
+    assert.equal(ack.success, false);
+    assert.match(ack.error, /Stop not sent yet .*until 8 s after the click/);
+    await ctx.clock.wait(back - ctx.clock.scale(performance.now() - clicked));
+    const bridge = await startBridge({ port });
+    t.after(() => bridge.halt());
+    await ctx.clock.wait(12_000);
+    const stops = bridge.of('mylink.move.stop');
+    assert.equal(stops.length, sent);
+    for (const stop of stops) {
+      assert.ok(ctx.clock.scale(stop.at - clicked) < 8000);
+    }
+    assert.equal(ctx.app.holds.size, 0);
+  });
+}
+
+test('a stop written without an answer: acked as a failure, never written twice', async (t) => {
+  const ctx = await setup(t);
+  const { gladys, bridge } = ctx;
+  await createAll(gladys);
+  bridge.answer = (request, b) =>
+    request.method === 'mylink.move.stop' ? 'silent' : defaultAnswer(request, b);
+  const ack = await press(gladys, 'CC0000A.1', 'state', 0);
   assert.equal(ack.success, false);
-  assert.match(ack.error, /Not sent yet/);
-  // The bridge comes back after the last try (3.5 + 10 s) and past 15 s.
-  await ctx.clock.wait(16_000);
-  const bridge = await startBridge({ port });
-  t.after(() => bridge.halt());
-  await ctx.clock.wait(10_000);
-  assert.equal(bridge.of('mylink.move.stop').length, 0);
-  assert.equal(ctx.app.holds.size, 0);
+  assert.match(ack.error, /Stop sent, but the bridge did not answer: check the shade/);
+  await ctx.clock.wait(15_000);
+  assert.equal(bridge.of('mylink.move.stop').length, 1);
 });
 
-test('order: a stop cancels an older open not written; a newer open written drops a held close', async (t) => {
+test('a close without an answer is written again within its budget, then held', async (t) => {
   const ctx = await setup(t);
   const { gladys, bridge, app } = ctx;
   await createAll(gladys);
-  // A slow bridge: the opens wait behind the first answer, the stop passes.
+  let silent = 3;
+  bridge.answer = (request, b) => {
+    if (request.method === 'mylink.move.down' && silent > 0) {
+      silent -= 1;
+      return 'silent';
+    }
+    return defaultAnswer(request, b);
+  };
+  const ack = await press(gladys, 'CC0000A.1', 'state', -1);
+  assert.equal(ack.success, false);
+  assert.match(ack.error, /Close not confirmed \(sent, the bridge did not answer\)/);
+  assert.equal(bridge.of('mylink.move.down').length, 3, 'written again within 3.5 s');
+  await until(() => app.holds.size === 0, 3000);
+  assert.equal(bridge.executed.filter((r) => r.method === 'mylink.move.down').length, 1);
+});
+
+test('the newest wins on arrival: an open refused, or a MyLink scene, drops the held close', async (t) => {
+  const ctx = await setup(t);
+  const { gladys, bridge, app } = ctx;
+  await createAll(gladys);
+  // a) close held, then open clicked while the bridge is down (refused): no close after it.
+  await bridge.halt();
+  await until(() => !app.link.conn);
+  assert.equal((await press(gladys, 'CC0000A.1', 'state', -1)).success, false);
+  assert.equal(app.holds.has('CC0000A.1'), true);
+  const open = await press(gladys, 'CC0000A.1', 'state', 1);
+  assert.equal(open.success, false);
+  assert.equal(app.holds.has('CC0000A.1'), false);
+  // b) close held on shade 2, then a MyLink scene launched once the bridge is back.
+  assert.equal((await press(gladys, 'CC0000A.2', 'state', -1)).success, false);
+  assert.equal(app.holds.has('CC0000A.2'), true);
+  await bridge.listen(bridge.port);
+  const scene = await press(gladys, '101', 'run', 1, 'scene');
+  assert.equal(scene.success, true, scene.error);
+  assert.equal(app.holds.size, 0);
+  await ctx.clock.wait(30_000);
+  assert.equal(bridge.of('mylink.move.down').length, 0);
+});
+
+test('order: a stop cancels an older open not written yet; reasons tell the real cause', async (t) => {
+  const ctx = await setup(t);
+  const { gladys, bridge } = ctx;
+  await createAll(gladys);
   bridge.answer = async (request, b) => {
-    await b.sleep(1500 / SPEED);
+    await b.sleep(600 / SPEED);
     return defaultAnswer(request, b);
   };
   const first = press(gladys, 'CC0000A.2', 'state', 1);
   await ctx.clock.wait(100);
   const open = press(gladys, 'CC0000A.1', 'state', 1);
+  const scene = press(gladys, '102', 'run', 1, 'scene');
   await ctx.clock.wait(100);
-  const stop = press(gladys, 'CC0000A.1', 'state', 0);
-  const [a, b, c] = await Promise.all([first, open, stop]);
-  assert.equal(a.success, true);
+  const stop = press(gladys, 'CC0000A.3', 'state', 0);
+  const stop1 = press(gladys, 'CC0000A.1', 'state', 0);
+  const [a, b, c, d, e] = await Promise.all([first, open, scene, stop, stop1]);
+  assert.equal(a.success, true, a.error);
   assert.equal(b.success, false);
-  assert.match(b.error, /newer stop or close/);
-  assert.equal(c.success, true);
-  const moves = bridge.requests.filter((r) => r.method.startsWith('mylink.move'));
+  assert.match(b.error, /newer stop or close of this shade/);
+  assert.equal(c.success, false);
+  assert.match(c.error, /arrived after this scene was launched/);
+  assert.equal(d.success, true, d.error);
+  assert.equal(e.success, true, e.error);
   assert.deepEqual(
-    moves.map((r) => [r.method, r.params.targetID]),
+    bridge.requests.slice(2).map((r) => [r.method, r.params.targetID]),
     [
       ['mylink.move.up', 'CC0000A.2'],
+      ['mylink.move.stop', 'CC0000A.3'],
       ['mylink.move.stop', 'CC0000A.1'],
     ],
   );
-  // A held close, then a newer open really written: the close is never sent after it.
-  bridge.answer = defaultAnswer;
-  await bridge.halt();
-  await until(() => !app.link.conn);
-  const close = await press(gladys, 'CC0000A.3', 'state', -1);
-  assert.equal(close.success, false);
-  assert.equal(app.holds.has('CC0000A.3'), true);
-  await bridge.listen(bridge.port);
-  const reopen = await press(gladys, 'CC0000A.3', 'state', 1);
-  assert.equal(reopen.success, true, reopen.error);
-  assert.equal(app.holds.has('CC0000A.3'), false);
-  await ctx.clock.wait(15_000);
-  const last = bridge.requests.filter((r) => r.params.targetID === 'CC0000A.3');
-  assert.deepEqual(
-    last.map((r) => r.method),
-    ['mylink.move.up'],
-  );
 });
 
-test('a Gladys scene closing five shades with 800 ms answers: all five sent and acked in time', async (t) => {
-  const ctx = await setup(t);
-  const { gladys, bridge } = ctx;
-  await createAll(gladys);
-  bridge.answer = async (request, b) => {
-    await b.sleep(800 / SPEED);
-    return defaultAnswer(request, b);
-  };
-  const start = performance.now();
-  const acks = await Promise.all(
-    ['CC0000A.1', 'CC0000A.2', 'CC0000A.3', 'CC0000A.4', 'CC0000A.5'].map((id) =>
-      press(gladys, id, 'state', -1),
-    ),
-  );
-  const elapsed = ctx.clock.scale(performance.now() - start);
-  assert.ok(
-    acks.every((a) => a.success),
-    JSON.stringify(acks),
-  );
-  assert.ok(elapsed < 5000, `acked within Gladys' 5 s: ${Math.round(elapsed)} ms`);
-  assert.equal(bridge.of('mylink.move.down').length, 5);
-  assert.equal(bridge.maxOpen, 1, 'one connection at a time');
-});
+for (const delay of [300, 900]) {
+  test(`"close all" on five shades, naive bridge answering in ${delay} ms: all closed, no success without an answer`, async (t) => {
+    const ctx = await setup(t);
+    const { gladys, bridge } = ctx;
+    await createAll(gladys);
+    bridge.mode = 'naive';
+    bridge.answer = async (request, b) => {
+      await b.sleep(delay / SPEED);
+      return defaultAnswer(request, b);
+    };
+    const ids = ['CC0000A.1', 'CC0000A.2', 'CC0000A.3', 'CC0000A.4', 'CC0000A.5'];
+    const acks = await Promise.all(ids.map((id) => press(gladys, id, 'state', -1)));
+    const answered = new Set(bridge.executed.map((r) => r.params.targetID));
+    for (const [index, ack] of acks.entries()) {
+      if (ack.success) {
+        assert.ok(answered.has(ids[index]), `${ids[index]} acked without an answer`);
+      }
+    }
+    const closed = () =>
+      new Set(
+        bridge.executed
+          .filter((r) => r.method === 'mylink.move.down')
+          .map((r) => r.params.targetID),
+      );
+    await until(() => closed().size === 5, 8000);
+    assert.equal(bridge.dropped ?? 0, 0);
+    assert.equal(bridge.maxInFlight, 1);
+    assert.equal(bridge.maxOpen, 1);
+  });
+}
 
-test('a command written without an answer is "sent, without answer", never "not sent"', async (t) => {
+test('a command written without an answer: acked as a failure saying the state is unknown', async (t) => {
   const ctx = await setup(t);
   const { gladys, bridge } = ctx;
   await createAll(gladys);
   bridge.answer = () => 'silent';
   const ack = await press(gladys, 'CC0000A.1', 'state', 1);
-  assert.equal(ack.success, true);
+  assert.equal(ack.success, false);
+  assert.match(ack.error, /Sent, but the bridge did not answer: state unknown/);
   assert.equal(ctx.store.data.assumed['CC0000A.1'].answer, 'none');
   await until(() => gladys.fake.transports.some((x) => /did not answer/.test(x.message?.en ?? '')));
+});
+
+test('an answer of the bridge to a command clears a refused marker and the unreachable badge', async (t) => {
+  const bridge = await startBridge();
+  bridge.systemId = 'another';
+  const ctx = await setup(t, { bridge });
+  await createAll(ctx.gladys);
+  assert.match(ctx.store.data.refused, /^[0-9a-f]{2}$/);
+  bridge.systemId = SYSTEM_ID;
+  const stop = await press(ctx.gladys, 'CC0000A.1', 'state', 0);
+  assert.equal(stop.success, true, stop.error);
+  await until(() => ctx.store.data.refused === null);
+  // No longer refused for the System ID (the list was never read, though).
+  const open = await press(ctx.gladys, 'CC0000A.1', 'state', 1);
+  assert.match(open.error, /not in the list/);
 });
 
 test('reads: never sooner than the interval, nor after a restart; Test and Scan once a minute', async (t) => {
@@ -478,6 +554,10 @@ test('getConfig failing at the start: tried again without end, with a status', a
   };
   await app.connected(loader);
   assert.match(gladys.fake.connectionStatus.message.en, /could not be read/);
+  await assert.rejects(
+    app.setValue(undefined, { external_id: 'ext:somfy-mylink:shade:CC0000A.1:state' }, 0),
+    /configuration n’a pas encore été lue/,
+  );
   await until(() => app.lastRead?.ok === true, 5000);
   assert.equal(failures, 0);
   assert.equal(gladys.fake.connectionStatus.connected, true);

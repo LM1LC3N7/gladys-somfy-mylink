@@ -53,6 +53,12 @@ export function reasonOf(err) {
       return { en: 'no answer in time', fr: 'pas de réponse à temps' };
     case 'closed':
       return { en: 'connection closed by the bridge', fr: 'connexion fermée par le pont' };
+    case 'stale':
+      return { en: 'no answer, connection cut', fr: 'pas de réponse, connexion coupée' };
+    case 'preempted':
+      return { en: 'cut by a command', fr: 'coupée par une commande' };
+    case 'unexpected':
+      return { en: 'unexpected answer of the bridge', fr: 'réponse inattendue du pont' };
     case 'tooLarge':
       return { en: 'answer too large', fr: 'réponse trop grande' };
     case 'format':
@@ -139,13 +145,19 @@ export const T = {
       en: `Assumed state: last command "${command.en}" ${answered ? 'accepted by the bridge' : 'sent, the bridge did not answer'}; never confirmed (RTS: no feedback).`,
       fr: `État supposé : dernière commande « ${command.fr} » ${answered ? 'acceptée par le pont' : 'envoyée, sans réponse du pont'} ; jamais confirmée (RTS : pas de retour).`,
     }),
-    held: (command) => ({
-      en: `"${command.en}" not sent yet: tried again in the next seconds.`,
-      fr: `« ${command.fr} » pas encore envoyé : nouvel essai dans les secondes qui viennent.`,
-    }),
+    held: (command) =>
+      command.en === 'stop'
+        ? {
+            en: '"stop" not confirmed yet: tried again until 8 s after the click; a new click on this shade cancels it.',
+            fr: '« stop » pas encore confirmé : nouvel essai jusqu’à 8 s après le clic ; un nouveau clic sur ce volet l’annule.',
+          }
+        : {
+            en: `"${command.en}" not confirmed yet: tried again until about 30 s after the click; a new click on this shade cancels it.`,
+            fr: `« ${command.fr} » pas encore confirmé : nouveaux essais jusqu’à environ 30 s après le clic ; un nouveau clic sur ce volet les annule.`,
+          },
     lost: (command) => ({
-      en: `"${command.en}" could not be sent (bridge not reachable).`,
-      fr: `« ${command.fr} » n’a pas pu être envoyé (pont injoignable).`,
+      en: `"${command.en}" not sent or not confirmed (bridge not reachable, or the integration restarted): check the shade.`,
+      fr: `« ${command.fr} » non envoyé ou non confirmé (pont injoignable, ou intégration redémarrée) : vérifiez le volet.`,
     }),
   },
 };
@@ -175,9 +187,31 @@ export const ERRORS = {
     en: 'Not sent: too many commands are waiting for the bridge.',
     fr: 'Non envoyé : trop de commandes attendent le pont.',
   },
+  configNotRead: {
+    en: 'Not sent: the configuration was not read from Gladys yet (tried again every 30 s).',
+    fr: 'Non envoyé : la configuration n’a pas encore été lue auprès de Gladys (nouvel essai toutes les 30 s).',
+  },
   cancelled: {
-    en: 'Not sent: a newer stop or close of this shade came first.',
-    fr: 'Non envoyé : un arrêt ou une fermeture plus récent de ce volet est passé avant.',
+    newerProtective: {
+      en: 'Not sent: a newer stop or close of this shade came first.',
+      fr: 'Non envoyé : un arrêt ou une fermeture plus récent de ce volet est passé avant.',
+    },
+    newerLeft: {
+      en: 'Not sent: a newer command of this shade left first.',
+      fr: 'Non envoyé : une commande plus récente de ce volet est partie avant.',
+    },
+    sceneAfter: {
+      en: 'Not sent: a stop or close of a shade arrived after this scene was launched.',
+      fr: 'Non envoyé : un arrêt ou une fermeture d’un volet est arrivé après le lancement de cette scène.',
+    },
+  },
+  noReply: {
+    en: 'Sent, but the bridge did not answer: state unknown.',
+    fr: 'Envoyé, mais le pont n’a pas répondu : état inconnu.',
+  },
+  stopNoReply: {
+    en: 'Stop sent, but the bridge did not answer: check the shade (a stop is never sent twice: at rest it moves the shade to its favourite position).',
+    fr: 'Stop envoyé, mais le pont n’a pas répondu : vérifiez le volet (un stop n’est jamais envoyé deux fois : à l’arrêt il envoie le volet à sa position favorite).',
   },
   notSent: (reason) => ({
     en: `Not sent: ${reason.en}.`,
@@ -191,8 +225,12 @@ export const ERRORS = {
     en: `The bridge refused the command: ${reason.en}.`,
     fr: `Le pont a refusé la commande : ${reason.fr}.`,
   }),
-  held: (reason, tries) => ({
-    en: `Not sent yet (${reason.en}): tried again ${tries} time(s) in the next seconds.`,
-    fr: `Pas encore envoyé (${reason.fr}) : nouvel essai ${tries} fois dans les secondes qui viennent.`,
+  heldStop: (reason) => ({
+    en: `Stop not sent yet (${reason.en}): tried again until 8 s after the click, never later; a new click on this shade cancels it.`,
+    fr: `Stop pas encore envoyé (${reason.fr}) : nouvel essai jusqu’à 8 s après le clic, jamais plus tard ; un nouveau clic sur ce volet l’annule.`,
+  }),
+  heldClose: (reason) => ({
+    en: `Close not confirmed (${reason.en}): tried again 5, 12 and 25 s after the click (until about 30 s), lost if the integration restarts; a new click on this shade cancels it.`,
+    fr: `Fermeture non confirmée (${reason.fr}) : nouveaux essais 5, 12 et 25 s après le clic (jusqu’à environ 30 s), perdus si l’intégration redémarre ; un nouveau clic sur ce volet les annule.`,
   }),
 };
