@@ -10,8 +10,9 @@
 //
 //   1. protective commands (stop, close), in their order of arrival: at once
 //      on an idle connection, else right after the answer to the request in
-//      flight; when that request got no answer for 1 s since it was written,
-//      a timer cuts the connection, waits until it is closed, and the
+//      flight; when that request (not a protective one: that one waits for
+//      its answer, within its own reply timeout) got no answer for 1 s since
+//      it was written, a timer cuts the connection, waits until it is closed, and the
 //      command goes on a new one. A connection that fails before the bytes
 //      are written is tried again every 250 ms within the deadline;
 //   2. the other commands (open, favourite position, scenes), in their order
@@ -237,7 +238,7 @@ export class Link {
         this.again = true;
         return;
       }
-      if (job.kind === 'protective') {
+      if (job.kind === 'protective' && entry.job.kind !== 'protective') {
         const staleAt = entry.writtenAt + this.timings.staleAfter;
         if (mono >= staleAt) {
           // No answer for a second: the connection may be stuck; a new one
@@ -249,8 +250,9 @@ export class Link {
         this.wakeAt(Math.min(staleAt, this.nextDeadline()));
         return;
       }
-      // Wait for the answer (it starts this loop again); a queued job past
-      // its deadline is still rejected on time.
+      // Wait for the answer (it starts this loop again; a protective request
+      // in flight has its own reply timeout, it is never cut by another
+      // protective one); a queued job past its deadline is still rejected on time.
       this.wakeAt(this.nextDeadline());
       return;
     }

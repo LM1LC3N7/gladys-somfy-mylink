@@ -21,6 +21,8 @@ the notes of the version's GitHub Release.
   held in memory only (a stop never later than 8 s after the click, never
   written twice; a close tried again until about 30 s); never replayed after
   a restart; any newer click on the shade, or a MyLink scene, cancels it.
+- A stop or close never cuts another stop or close in flight, even on a bridge
+  slower than 1 s: it waits for that answer.
 - One connection and one request at a time to the bridge; a command without
   an answer of the bridge is shown as an error, never as a success; a
   refused System ID stops the reads until it changes.

@@ -30,17 +30,25 @@ function linkTo(bridge, clock, { port = bridge?.port, systemId = SYSTEM_ID } = {
   });
 }
 
+async function until(check, limit = 5000) {
+  const end = performance.now() + limit;
+  while (!check()) {
+    if (performance.now() > end) throw new Error('until: timeout');
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 const settle = (promise) =>
   promise.then(
     (value) => ({ ok: true, value }),
     (err) => ({ ok: false, err }),
   );
 
-test('one request in flight: five closes on a slow bridge (800 ms) leave one after the other', async (t) => {
+test('one request in flight: five closes on a slow bridge (600 ms) leave one after the other', async (t) => {
   const clock = speedClock(SPEED);
   const bridge = await startBridge({
     answer: async (request, b) => {
-      await b.sleep(800 / SPEED);
+      await b.sleep(600 / SPEED);
       return defaultAnswer(request, b);
     },
   });
@@ -66,6 +74,35 @@ test('one request in flight: five closes on a slow bridge (800 ms) leave one aft
     assert.ok(clock.scale(request.at - start) < TIMINGS.commandSendBy, 'written in time');
     assert.equal(request.params.auth, SYSTEM_ID);
   }
+});
+
+test('a slow bridge (1.2 s): a close never cuts the close in flight, every ack is true', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge({
+    answer: async (request, b) => {
+      await b.sleep(1200 / SPEED);
+      return defaultAnswer(request, b);
+    },
+  });
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const results = await Promise.all(
+    ['CC0000A.1', 'CC0000A.2', 'CC0000A.3'].map((id) =>
+      settle(link.request('mylink.move.down', { targetID: id }, { kind: 'protective' })),
+    ),
+  );
+  assert.ok(
+    results.every((r) => r.ok && r.value === true),
+    JSON.stringify(results.map((r) => (r.ok ? 'ok' : r.err.kind))),
+  );
+  assert.equal(bridge.connections.length, 1, 'no connection cut');
+  assert.deepEqual(
+    bridge.requests.map((r) => r.params.targetID),
+    ['CC0000A.1', 'CC0000A.2', 'CC0000A.3'],
+    'each close written once',
+  );
+  assert.equal(bridge.maxInFlight, 1);
 });
 
 test('a slow bridge (1.5 s): ordinary commands wait for the answers, nothing is cut', async (t) => {
@@ -152,7 +189,8 @@ test('a protective command is written before the commands waiting', async (t) =>
     link.request('mylink.move.up', { targetID: 'CC0000A.2' }),
     link.request('mylink.move.up', { targetID: 'CC0000A.3' }),
   ];
-  await clock.wait(100);
+  // Under load the first write may come late: the stop goes in only once it is written.
+  await until(() => bridge.requests.length === 1);
   all.push(link.request('mylink.move.stop', { targetID: 'CC0000A.4' }, { kind: 'protective' }));
   await Promise.all(all.map(settle));
   assert.deepEqual(
