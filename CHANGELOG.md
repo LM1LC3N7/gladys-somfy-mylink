@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-26
+
 ### Added
 
 - Somfy RTS shades of a MyLink bridge as Gladys shutters (open, close, stop)
@@ -27,3 +29,6 @@ the notes of the version's GitHub Release.
   an answer of the bridge is shown as an error, never as a success; a
   refused System ID stops the reads until it changes.
 - Documentation in English and French, cover image.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-somfy-mylink/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-somfy-mylink/releases/tag/v0.1.1
