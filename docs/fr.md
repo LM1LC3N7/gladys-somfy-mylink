@@ -1,67 +1,107 @@
-# Template de démonstration
+# Somfy MyLink pour Gladys
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Cette intégration pilote vos volets et stores à moteur **Somfy RTS** par le
+**pont Somfy MyLink**, sur votre réseau local : ouverture, fermeture, arrêt,
+position favorite (« my ») et scènes MyLink. Elle parle à l'API « Synergy » du
+pont (TCP, port 44100) ; le cloud Somfy n'est pas utilisé.
 
-## Ce que vous obtenez
+> **Non officiel**, sans lien avec Somfy. L'intégration n'a **jamais été
+> testée avec un vrai pont** pour l'instant : elle suit le protocole de la
+> bibliothèque pysomfymylink (celle de Home Assistant). Vos retours sont les
+> bienvenus.
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+## Avant de commencer
+
+1. Installez le pont et vos volets dans l'application **MyLink**.
+2. Dans l'application, menu **Intégration**, notez le **System ID**.
+3. Donnez au pont une adresse IP fixe dans votre box (réservation DHCP).
 
 ## Configuration
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+- **Adresse du pont** : son adresse IP, par exemple `192.168.1.60` (port
+  44100 par défaut ; `192.168.1.60:44100` est accepté).
+- **System ID** : gardé par Gladys dans sa base, jamais réaffiché, envoyé
+  seulement à votre pont. Il n'apparaît dans aucun journal, aucun statut ni
+  dans `/data`.
+- **Intervalle de lecture** (60 à 3600 s, 300 par défaut) : la liste des
+  volets et des scènes est relue à ce rythme, seulement pour savoir si le pont
+  répond.
+- **Langue** des noms des fonctionnalités.
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+Le bouton **Tester la connexion** relit le pont (au plus une fois par minute).
 
-## Actions
+## Ce que vous obtenez
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+- Un **volet** par moteur du pont : `Ouverture / fermeture` (ouvrir, fermer,
+  stop) et un bouton `Position favorite (my)`.
+- Un **bouton** par scène MyLink (`Lancer`).
 
-## Scènes
+Jamais d'interrupteur : un « tout éteindre » n'atteint pas vos volets.
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+## L'état est supposé, jamais confirmé
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+Les moteurs RTS sont à **sens unique** : ils ne renvoient ni leur état ni leur
+position, et le pont dit seulement qu'il a pris la commande. Donc :
 
-## Tableau de bord
+- il n'y a **pas de position** dans Gladys ;
+- la valeur que Gladys affiche pour `Ouverture / fermeture` est la **dernière
+  commande envoyée**, pas un état mesuré : un volet indiqué « fermé » a reçu
+  l'ordre de fermer, rien de plus (télécommande, obstacle, protection
+  thermique du moteur peuvent l'avoir changé) ;
+- le badge de chaque volet (point orange) dit « État supposé » avec la
+  dernière commande et si le pont l'a acceptée ;
+- aucune commande ne peut être « confirmée par une relecture » : une commande
+  réussie veut dire « acceptée par le pont », et sans réponse du pont elle est
+  dite « envoyée, sans réponse du pont », jamais « non envoyée ».
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
+**Stop et position favorite** : sur un moteur RTS, c'est le même bouton
+« my ». Pendant un mouvement, il arrête le volet ; à l'arrêt, il l'envoie à sa
+position favorite. Le pont ne sait pas si le volet bouge : appuyer sur stop
+quand le volet est immobile le déplace donc vers sa position favorite.
 
-## Dépannage
+## Arrêt et fermeture
 
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+L'arrêt et la fermeture passent **avant** tout le reste : une lecture en cours
+est coupée, une connexion sans réponse depuis une seconde est fermée puis
+rouverte, et ils n'attendent ni la liste des volets, ni le System ID validé
+par une lecture, ni une lecture récente. Un seul échange à la fois avec le
+pont (il n'accepte qu'une connexion) ; plusieurs commandes simultanées (une
+scène Gladys sur cinq volets) partent à la suite sur la même connexion.
+
+Ils sont refusés dans ces cas, et seulement ceux-là :
+
+1. l'adresse ou le System ID manque dans la configuration (rien n'est envoyé) ;
+2. la valeur reçue n'est pas « fermer » ou « stop » ;
+3. une commande plus récente du même volet est déjà partie (la plus récente
+   gagne) ;
+4. le pont répond une erreur (System ID refusé, volet inconnu du pont) : le
+   message le dit ;
+5. le pont n'a pas pu être joint dans les 3,5 s qui suivent le clic (essais
+   toutes les 250 ms) : la commande est alors **gardée** et réessayée 2, 5 et
+   10 s plus tard. Une fermeture gardée est notée dans `/data` et repart
+   après un redémarrage, dans les deux minutes du clic. Un arrêt gardé est
+   abandonné 15 s après le clic : plus tard, le volet a fini sa course et le
+   « stop » le déplacerait vers sa position favorite.
+
+## Ouverture, position favorite, scènes
+
+Elles sont refusées, sans rien envoyer, si : l'adresse ou le System ID manque ;
+le pont a refusé le System ID ; le volet ou la scène n'est pas dans la liste
+lue sur le pont (bouton Scanner de l'onglet Découverte) ; 32 commandes
+attendent déjà ; un arrêt ou une fermeture plus récent du même volet est
+arrivé avant leur envoi ; elles n'ont pas pu partir dans les 3,5 s (pont
+occupé ou injoignable). Elles ne sont jamais réessayées.
+
+## System ID refusé
+
+Si le pont refuse le System ID, l'intégration s'arrête de lire le pont (le
+refus est gardé dans `/data` sous une marque de 8 bits qui ne permet pas de
+retrouver le System ID) jusqu'à ce que vous enregistriez un autre System ID ou
+que **Tester la connexion** réussisse. L'arrêt et la fermeture sont quand même
+envoyés.
+
+## Confidentialité
+
+Tout reste sur votre réseau local. `/data` contient l'heure de la dernière
+lecture, la liste des volets et des scènes (identifiants et noms), la dernière
+commande de chaque volet et les fermetures gardées ; jamais le System ID.

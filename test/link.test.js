@@ -1,0 +1,241 @@
+// -----------------------------------------------------------------------------
+// The link to one bridge against a simulated bridge on 127.0.0.1, on a
+// sped-up real clock: one connection at a time, protective commands first,
+// reads cut by commands, a silent connection cut before a stop (and the new
+// one opened only once the old one is closed), retries within the budget,
+// nothing written after its deadline.
+// -----------------------------------------------------------------------------
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { TIMINGS } from '../src/constants.js';
+import { Link } from '../src/mylink/link.js';
+import {
+  SYSTEM_ID,
+  defaultAnswer,
+  freePort,
+  speedClock,
+  startBridge,
+} from './helpers/fakeBridge.js';
+
+const SPEED = 10;
+
+function linkTo(bridge, clock, { port = bridge?.port, systemId = SYSTEM_ID } = {}) {
+  return new Link({
+    address: { host: '127.0.0.1', port },
+    systemId,
+    timers: clock.timers,
+    monotonic: clock.monotonic,
+    timings: TIMINGS,
+  });
+}
+
+const settle = (promise) =>
+  promise.then(
+    (value) => ({ ok: true, value }),
+    (err) => ({ ok: false, err }),
+  );
+
+test('five commands on a slow bridge (800 ms each): one connection, all written within 3.5 s', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge({
+    answer: async (request, b) => {
+      await b.sleep(800 / SPEED);
+      return defaultAnswer(request, b);
+    },
+  });
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const start = performance.now();
+  const results = await Promise.all(
+    ['CC0000A.1', 'CC0000A.2', 'CC0000A.3', 'CC0000A.4', 'CC0000A.5'].map((id) =>
+      settle(link.request('mylink.move.down', { targetID: id }, { kind: 'protective' })),
+    ),
+  );
+  assert.ok(
+    results.every((r) => r.ok && r.value === true),
+    JSON.stringify(results),
+  );
+  assert.equal(bridge.maxOpen, 1);
+  assert.equal(bridge.requests.length, 5);
+  for (const request of bridge.requests) {
+    assert.ok(clock.scale(request.at - start) < TIMINGS.commandSendBy, 'written in time');
+    assert.equal(request.params.auth, SYSTEM_ID);
+  }
+  // Ordinary commands too: written after the answer or 400 ms after the previous one.
+  bridge.requests.length = 0;
+  const begin = performance.now();
+  const moves = await Promise.all(
+    ['CC0000A.1', 'CC0000A.2', 'CC0000A.3', 'CC0000A.4', 'CC0000A.5'].map((id) =>
+      settle(link.request('mylink.move.up', { targetID: id }, { kind: 'command' })),
+    ),
+  );
+  assert.ok(moves.every((r) => r.ok));
+  const at = bridge.requests.map((r) => clock.scale(r.at - begin));
+  assert.ok(at[4] < TIMINGS.commandSendBy, `written at ${at.map(Math.round)}`);
+  for (let i = 1; i < at.length; i += 1) {
+    assert.ok(at[i] - at[i - 1] >= 0.8 * TIMINGS.pipelineAfter, `spaced: ${at.map(Math.round)}`);
+  }
+  assert.equal(bridge.maxOpen, 1);
+});
+
+test('a protective command is written before the commands waiting', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge({
+    answer: async (request, b) => {
+      await b.sleep(600 / SPEED);
+      return defaultAnswer(request, b);
+    },
+  });
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const all = [
+    link.request('mylink.move.up', { targetID: 'CC0000A.1' }),
+    link.request('mylink.move.up', { targetID: 'CC0000A.2' }),
+    link.request('mylink.move.up', { targetID: 'CC0000A.3' }),
+  ];
+  await clock.wait(100);
+  all.push(link.request('mylink.move.stop', { targetID: 'CC0000A.4' }, { kind: 'protective' }));
+  await Promise.all(all.map(settle));
+  assert.deepEqual(
+    bridge.requests.map((r) => r.params.targetID),
+    ['CC0000A.1', 'CC0000A.4', 'CC0000A.2', 'CC0000A.3'],
+  );
+});
+
+test('a read is cut at once by a command; the new connection opens after the old one is closed', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge({
+    answer: (request, b) =>
+      request.method === 'mylink.status.info' ? 'silent' : defaultAnswer(request, b),
+  });
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const read = settle(link.request('mylink.status.info', { targetID: '*.*' }, { kind: 'read' }));
+  await clock.wait(200);
+  const start = performance.now();
+  const up = await settle(link.request('mylink.move.up', { targetID: 'CC0000A.1' }));
+  assert.equal(up.ok, true);
+  assert.ok(clock.scale(performance.now() - start) < 500, 'not behind the read');
+  const r = await read;
+  assert.equal(r.ok, false);
+  assert.equal(r.err.kind, 'preempted');
+  assert.equal(bridge.connections.length, 2);
+  assert.ok(bridge.connections[0].closed <= bridge.connections[1].opened + 1);
+  assert.equal(bridge.maxOpen, 1);
+});
+
+test('a silent connection is cut before a stop (≥ 1 s without a byte), a new one carries it', async (t) => {
+  const clock = speedClock(SPEED);
+  let silent = true;
+  const bridge = await startBridge({
+    answer: (request, b) => (silent ? 'silent' : defaultAnswer(request, b)),
+  });
+  bridge.serial = false;
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const up = settle(link.request('mylink.move.up', { targetID: 'CC0000A.1' }));
+  await clock.wait(1200);
+  silent = false;
+  const start = performance.now();
+  const stop = await settle(
+    link.request('mylink.move.stop', { targetID: 'CC0000A.1' }, { kind: 'protective' }),
+  );
+  assert.equal(stop.ok, true, JSON.stringify(stop));
+  assert.ok(clock.scale(performance.now() - start) < 1000);
+  const u = await up;
+  assert.equal(u.ok, false);
+  assert.equal(u.err.written, true, 'the open may have left: never "not sent"');
+  assert.equal(bridge.connections.length, 2);
+  assert.equal(bridge.maxOpen, 1);
+  assert.equal(bridge.requests[1].conn, 1);
+});
+
+test('a stop is tried again every 250 ms while the bridge refuses connections, within its budget', async (t) => {
+  const clock = speedClock(SPEED);
+  const port = await freePort();
+  const link = linkTo(undefined, clock, { port });
+  t.after(() => link.close());
+  const stop = settle(
+    link.request(
+      'mylink.move.stop',
+      { targetID: 'CC0000A.1' },
+      { kind: 'protective', retry: true, deadline: clock.monotonic() + TIMINGS.commandSendBy },
+    ),
+  );
+  await clock.wait(1000);
+  const bridge = await startBridge({ port });
+  t.after(() => bridge.halt());
+  const r = await stop;
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(bridge.of('mylink.move.stop').length, 1);
+});
+
+test('nothing is written after its deadline; a command not written is "not sent"', async (t) => {
+  const clock = speedClock(SPEED);
+  const port = await freePort();
+  const link = linkTo(undefined, clock, { port });
+  t.after(() => link.close());
+  const up = settle(link.request('mylink.move.up', { targetID: 'CC0000A.1' }));
+  const stop = settle(
+    link.request(
+      'mylink.move.stop',
+      { targetID: 'CC0000A.1' },
+      { kind: 'protective', retry: true },
+    ),
+  );
+  const [u, s] = await Promise.all([up, stop]);
+  assert.equal(u.ok, false);
+  assert.equal(u.err.written, false);
+  assert.equal(s.ok, false);
+  assert.equal(s.err.written, false);
+  assert.equal(s.err.kind, 'unreachable');
+  // The bridge comes back: nothing old is written.
+  const bridge = await startBridge({ port });
+  t.after(() => bridge.halt());
+  await clock.wait(1000);
+  assert.equal(bridge.requests.length, 0);
+});
+
+test('beforeSend false cancels right before the bytes; an answer error is kept by kind', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge();
+  t.after(() => bridge.halt());
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const cancelled = await settle(
+    link.request('mylink.move.up', { targetID: 'CC0000A.1' }, { beforeSend: () => false }),
+  );
+  assert.equal(cancelled.err.kind, 'cancelled');
+  assert.equal(bridge.requests.length, 0);
+  const wrong = linkTo(bridge, clock, { systemId: 'wrong' });
+  t.after(() => wrong.close());
+  const refused = await settle(wrong.request('mylink.move.up', { targetID: 'CC0000A.1' }));
+  assert.equal(refused.err.kind, 'auth');
+  assert.equal(refused.err.written, true);
+  assert.doesNotMatch(JSON.stringify(refused.err) + refused.err.message, /wrong|Invalid auth/);
+});
+
+test('keepalives between answers are skipped; an oversized answer cuts the connection', async (t) => {
+  const clock = speedClock(SPEED);
+  const bridge = await startBridge();
+  t.after(() => bridge.halt());
+  bridge.answer = (request, b) => {
+    for (const socket of b.sockets) socket.write('{"keepalive":30}\n');
+    return request.method === 'mylink.status.info'
+      ? { result: [{ targetID: 'A.1', name: 'x'.repeat(70 * 1024) }] }
+      : defaultAnswer(request, b);
+  };
+  const link = linkTo(bridge, clock);
+  t.after(() => link.close());
+  const up = await settle(link.request('mylink.move.up', { targetID: 'CC0000A.1' }));
+  assert.equal(up.ok, true);
+  const read = await settle(
+    link.request('mylink.status.info', { targetID: '*.*' }, { kind: 'read' }),
+  );
+  assert.equal(read.err.kind, 'tooLarge');
+});
