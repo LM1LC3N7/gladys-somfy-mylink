@@ -1,6 +1,6 @@
 {
   "name": "gladys-somfy-mylink",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Gladys Assistant external integration for Somfy RTS motors through the Somfy MyLink bridge, on the local network. Unofficial, not affiliated with Somfy.",
   "type": "module",

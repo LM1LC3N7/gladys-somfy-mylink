@@ -6,8 +6,8 @@
     "en": "Somfy RTS shades and scenes through the Somfy MyLink bridge, on the local network. Unofficial.",
     "fr": "Volets Somfy RTS et scènes par le pont Somfy MyLink, sur le réseau local. Non officiel."
   },
-  "version": "0.1.1",
-  "docker_image": "ghcr.io/lm1lc3n7/gladys-somfy-mylink:0.1.1",
+  "version": "0.1.2",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-somfy-mylink:0.1.2",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-somfy-mylink/main/cover.png",
   "categories": ["lighting"],
