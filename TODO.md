@@ -59,9 +59,11 @@ up to date at the end of every milestone.
 - **Version 0.1.0 set by hand** (package.json, package-lock.json, manifest,
   `docker_image` tag) for the first milestone, as the lot asks; from now on the
   Release workflow owns it (the first patch release gives 0.1.1).
-- **SDK `^0.15.0`**: 0.16.0 is not published yet (`npm view` on 2026-10-26
-  gives 0.15.0); migration planned when it is (types ai/tts/music only,
-  nothing breaking).
+- **SDK `^0.16.0`** (2026-10-27, migration wave 2): 0.16.0 is on npm since
+  2026-10-25 (a stale npm cache said otherwise); it adds the ai, tts and music
+  types; no effect here (`should_poll` explicit, `poll_frequency` unused).
+  `keywords`, `countries` and `gladys_version >= 5.3.0` wait until Gladys 5.3
+  is widespread.
 - **No "confirmed" command**: RTS gives no feedback and the bridge only
   acknowledges, so the rule "a command succeeds only after a read showing it"
   cannot apply. A command is "accepted by the bridge" (its answer) or "sent,

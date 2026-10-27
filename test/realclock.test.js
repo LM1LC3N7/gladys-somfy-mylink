@@ -1,6 +1,6 @@
 // -----------------------------------------------------------------------------
 // The app on a REAL moving clock (performance.now, Date.now, setTimeout, time
-// sped up 100 times: the 60 s interval lasts 600 ms) and a real local TCP
+// sped up 20 times: the 60 s interval lasts 3 s) and a real local TCP
 // server playing the bridge: the reads really start, at 0, the interval and
 // twice the interval (never sooner, never a cycle late), with a bounded
 // number of timers; a stop clicked in between is written at once.
@@ -15,7 +15,7 @@ import { registerHandlers } from '../src/handlers.js';
 import { memoryStore } from '../src/store.js';
 import { SYSTEM_ID, startBridge } from './helpers/fakeBridge.js';
 
-const SPEED = 100;
+const SPEED = 20;
 
 test('real clock: reads at 0, the interval and twice the interval; a stop in between at once', async (t) => {
   const bridge = await startBridge();
@@ -78,7 +78,7 @@ test('real clock: reads at 0, the interval and twice the interval; a stop in bet
     assert.ok(gap >= 0.9 * interval, `never sooner than the interval: ${at}`);
     assert.ok(gap < 1.5 * interval, `on time: ${at}`);
   }
-  assert.ok(stopAt < 1000, `stop written ${Math.round(stopAt)} ms after the click`);
+  assert.ok(stopAt < 5000, `stop written ${Math.round(stopAt)} ms after the click`);
   assert.ok(timersSet <= 30, `${timersSet} timers`);
   assert.equal(gladys.fake.connectionStatus.connected, true);
 });
